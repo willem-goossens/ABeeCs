@@ -1,0 +1,3243 @@
+---
+title: "Name harmonization"
+author: "Willem Goossens"
+date: "2026-09-10"
+output: html_document
+---
+
+# START
+Empty environment
+```{r}
+rm(list=ls())
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(xml2)
+library(plantnet)
+library(rgbif)
+library(taxize)
+```
+
+Load data
+```{r}
+# Original dataset
+pol <- read.csv("../Data/Observation/observation_org_bees.csv")
+nat <- read_csv("../Results/iNaturalist_bees_all.csv", show_col_types = FALSE)
+
+# Identifications
+pol_plantnet <- read.csv("../Results/Plantnet_identification.csv")
+pol_plantnet_iNat <- read.csv("../Results/Plantnet_identification_iNat_all.csv")
+```
+
+
+Combine identifications
+```{r}
+# Make character
+pol_plantnet$ID <- as.character(pol_plantnet$ID)
+pol_plantnet <- bind_rows(pol_plantnet, pol_plantnet_iNat)
+```
+
+
+Combine observations
+```{r}
+## OBSERVATION.ORG ##
+# Reduce dataset with relevant columns
+pol_data <- pol |> dplyr::select(id, date, time, lat, lng, accuracy, euromed_region, validation.status,
+                                 scientific.name, family, species.type, number, sex, life.stage, activity,
+                                 related.species, link)
+
+# Add source platform
+pol_data$source <- "Observation.org"
+pol_data <- pol_data |> relocate(source, .before = id)
+
+# Change names for now
+colnames(pol_data) <- c("Platform","Obs_ID","Date","Time","Latitude","Longitude","Coordinate_uncertainty","Euro+Med_region","Observation_quality",
+                        "Pol_original","Pol_family_original","Pol_rank_original","Number","Sex","Life_stage","Activity",
+                        "User_original","Link")
+
+# Change ID
+pol_data$Obs_ID <- as.character(pol_data$Obs_ID)
+
+
+## iNATURALIST ##
+# Assign the link
+nat$link <- paste("https://www.inaturalist.org/observations/", nat$observation_uuid, sep= "")
+
+# Get relevant columns
+nat_data <- nat |> dplyr::select(observation_uuid, observed_on,  latitude, longitude,positional_accuracy, Country, quality_grade, anomaly_score, 
+                                 name, family_inat, link)
+
+# Assign source
+nat_data$source <- "iNaturalist.org"
+nat_data <- nat_data |> relocate(source, .before = observation_uuid)
+
+colnames(nat_data) <- c("Platform","Obs_ID","Date", "Latitude","Longitude","Coordinate_uncertainty","Euro+Med_region","Observation_quality", "Anomaly_score",
+                        "Pol_original","Pol_original_family", "Link")
+
+
+## COMBINE ##
+# Make sure date corresponds
+pol_data$Date <- as.Date(pol_data$Date, format = "%Y-%m-%d")
+nat_data$Date <- as.Date(nat_data$Date, format = "%Y-%m-%d")
+
+# Combine
+all_data <- bind_rows(pol_data, nat_data)
+```
+
+
+# BEE
+## 2.1 GBIF
+```{r}
+# Get bee names
+names <- all_data |> distinct(Pol_original, Pol_family_original, Pol_rank_original)
+names$old_name <- names$Pol_original
+names$Pol_original <- gsub(" spec.", "", names$Pol_original)
+names$Pol_original <- gsub("-gr.", "", names$Pol_original)
+names$Pol_original <- sub(".*\\((.*)\\).*", "\\1", names$Pol_original)
+names$Pol_original <- gsub(" indet.", "", names$Pol_original)
+
+# Check again with gbif
+gbif <- name_backbone_checklist(names$Pol_original[1], kingdom = "ANIMALIA")
+# Subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(names$Pol_original)/10*(i-1))
+  end <- floor(length(names$Pol_original)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(names$Pol_original[begin: end], kingdom = "ANIMALIA")
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+
+# Save because it takes some time
+gbif_pol_all <- gbif
+
+
+##########
+# Get final names (i.e. when there are subspecies or species)
+# Subspecies
+gbif$final <- gbif$subspecies
+gbif$final[is.na(gbif$final)] <- gbif$variety[is.na(gbif$final)]
+gbif$final_key <- gbif$subspeciesKey
+gbif$final_key[is.na(gbif$final_key)] <- gbif$varietyKey[is.na(gbif$final_key)]
+
+
+##########
+# Validated initial name
+gbif_acc <-  gbif[gbif$status== "ACCEPTED" & gbif$matchType == "EXACT" ,]
+# Subset
+names_subset <- names[names$Pol_original %in% gbif_acc$verbatim_name, ]
+# Add subspecies
+names_subset$subspecies <- gbif_acc$final[match(names_subset$Pol_original, gbif_acc$verbatim_name)]
+names_subset$rank[!is.na(names_subset$subspecies)] <- "Subspecies"
+names_subset$key[!is.na(names_subset$subspecies)] <- gbif_acc$final_key[match(names_subset$Pol_original[!is.na(names_subset$subspecies)], gbif_acc$verbatim_name)]
+# Species
+names_subset$species <- gbif_acc$species[match(names_subset$Pol_original, gbif_acc$verbatim_name)]
+names_subset$key[is.na(names_subset$rank) & !is.na(names_subset$species)] <- 
+  gbif_acc$speciesKey[match(names_subset$Pol_original[is.na(names_subset$rank) & !is.na(names_subset$species)], gbif_acc$verbatim_name)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$species)] <- "Species"
+# Genus
+names_subset$genus <- gbif_acc$genus[match(names_subset$Pol_original, gbif_acc$verbatim_name)]
+names_subset$key[is.na(names_subset$rank) & !is.na(names_subset$genus)] <- 
+  gbif_acc$genusKey[match(names_subset$Pol_original[is.na(names_subset$rank) & !is.na(names_subset$genus)], gbif_acc$verbatim_name)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$genus)] <- "Genus"
+# Family
+names_subset$family <- gbif_acc$family[match(names_subset$Pol_original, gbif_acc$verbatim_name)]
+names_subset$key[is.na(names_subset$rank) & !is.na(names_subset$family)] <- 
+  gbif_acc$familyKey[match(names_subset$Pol_original[is.na(names_subset$rank) & !is.na(names_subset$family)], gbif_acc$verbatim_name)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$family)] <- "Family"
+# Overall
+names_subset$bee_name <- gbif_acc$canonicalName[match(names_subset$Pol_original, gbif_acc$verbatim_name)]
+names_subset$bee_name_scientific <- gbif_acc$scientificName[match(names_subset$Pol_original, gbif_acc$verbatim_name)]
+
+# Add to names overall
+names$subspecies <- NA
+names$rank <- NA
+names$key <- NA
+names$species <- NA
+names$genus <- NA
+names$family <- NA
+names$bee_name <- NA
+names$bee_name_scientific <- NA
+names[names$Pol_original %in% gbif_acc$verbatim_name, ] <- names_subset
+
+
+
+
+##########
+# Higherrank 
+# Check dataframe ourselves quickly
+acc_gbif <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "HIGHERRANK" & gbif$rank == "SPECIES",]
+
+# Subset
+names_subset <- names[names$Pol_original %in% acc_gbif$verbatim_name, ]
+# Remove some that you want to keep
+acc_gbif <- acc_gbif[!acc_gbif$verbatim_name %in% c( "Amegilla quadrifasciata maderae"),]
+names_subset <- names_subset[!names_subset$Pol_original %in% c( "Amegilla quadrifasciata maderae"),]
+
+# Species
+names_subset$species <- acc_gbif$species[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$species)] <- "Species"
+names_subset$key <- acc_gbif$speciesKey[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# Genus
+names_subset$genus <- acc_gbif$genus[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# Family
+names_subset$family <- acc_gbif$family[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# Canonical name
+names_subset$bee_name <- acc_gbif$canonicalName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$bee_name_scientific <- acc_gbif$scientificName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+
+# Add
+names[names$Pol_original %in% acc_gbif$verbatim_name, ] <- names_subset
+
+
+
+
+##########
+# Synonyms
+# Check dataframe ourselves quickly
+acc_gbif <- gbif[gbif$status== "SYNONYM" & gbif$matchType %in% c("EXACT", "HIGHERRANK"),]
+
+# Subset
+names_subset <- names[names$Pol_original %in% acc_gbif$verbatim_name, ]
+
+# Add subspecies
+names_subset$subspecies <- acc_gbif$final[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$rank[!is.na(names_subset$subspecies)] <- "Subspecies"
+names_subset$key <- acc_gbif$final_key[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# Species
+names_subset$species <- acc_gbif$species[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$key[is.na(names_subset$rank) & !is.na(names_subset$species)] <- 
+  acc_gbif$speciesKey[match(names_subset$Pol_original[is.na(names_subset$rank) & !is.na(names_subset$species)], acc_gbif$verbatim_name)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$species)] <- "Species"
+# These are all subgenera, we add genus as is
+names_subset$genus <- acc_gbif$genus[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$key[is.na(names_subset$rank) & !is.na(names_subset$genus)] <- 
+  acc_gbif$genusKey[match(names_subset$Pol_original[is.na(names_subset$rank) & !is.na(names_subset$genus)], acc_gbif$verbatim_name)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$genus)] <- "Subgenus"
+# Family
+names_subset$family <- acc_gbif$family[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# These will include the accepted name to the highest level
+names_subset$bee_name <- name_parse(acc_gbif$acceptedScientificName[match(names_subset$Pol_original, acc_gbif$verbatim_name)])$canonicalname
+names_subset$bee_name_scientific <- acc_gbif$acceptedScientificName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$bee_name[names_subset$rank %in% "Subgenus"] <- acc_gbif$canonicalName[match(names_subset$Pol_original[names_subset$rank %in% "Subgenus"], acc_gbif$verbatim_name)]
+names_subset$bee_name_scientific[names_subset$rank %in% "Subgenus"] <-
+  acc_gbif$scientificName[match(names_subset$Pol_original[names_subset$rank %in% "Subgenus"], acc_gbif$verbatim_name)]
+
+
+# Add
+names[names$Pol_original %in% acc_gbif$verbatim_name, ] <- names_subset
+
+
+
+
+##########
+# REMAINING
+gbif_remaining <- gbif[!gbif$verbatim_name %in% names$Pol_original[!is.na(names$key)],]
+acc_gbif <- gbif_remaining[gbif_remaining$status== "ACCEPTED" & gbif_remaining$matchType == "HIGHERRANK" & gbif_remaining$rank == "GENUS",]
+
+# Remove some
+acc_gbif <- acc_gbif[!acc_gbif$verbatim_name %in% c("Lasioglossum haesitans", "Lasioglossum fulvicorne-fratellum", "Eucera subtilis","Eucera rhodia",
+                                                   "Eucera multesima" ,"Eucera major", "Andrena taedium", "Megachile strymonia", "Bombus konradini") ,]
+
+# Subset
+names_subset <- names[names$Pol_original %in% acc_gbif$verbatim_name, ]
+
+# Genus
+names_subset$genus <- acc_gbif$genus[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$genus)] <- "Genus"
+names_subset$key <- acc_gbif$genusKey[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# Family
+names_subset$family <- acc_gbif$family[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# These will include the accepted name to the highest level
+names_subset$bee_name <- acc_gbif$canonicalName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$rank[grepl(".*\\((.*)\\).*", names_subset$old_name)] <- "Subgenus"
+names_subset$bee_name_scientific <- acc_gbif$scientificName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+
+# Add
+names[names$Pol_original %in% acc_gbif$verbatim_name, ] <- names_subset
+
+
+
+
+##########
+# REMAINING
+gbif_remaining <- gbif[!gbif$verbatim_name %in% names$Pol_original[!is.na(names$key)],]
+acc_gbif <- gbif_remaining[gbif_remaining$status %in% "PROVISIONALLY_ACCEPTED" ,]
+
+# Remove some
+acc_gbif <- acc_gbif[!acc_gbif$verbatim_name %in% c("Nomiapis monstrosa") ,]
+
+# These are all subgenera
+subgenus_to_genus <- tibble(subgenus = acc_gbif$genus ) |>
+  mutate(genus = case_when(
+    str_detect(subgenus, regex("andrena"))   ~ "Andrena",
+    str_detect(subgenus, regex("halictus"))  ~ "Halictus",
+    str_detect(subgenus, regex("bombus"))    ~ "Bombus",
+    str_detect(subgenus, regex("megachile")) ~ "Megachile",
+    str_detect(subgenus, regex("anthidium")) ~ "Anthidium",
+    str_detect(subgenus, regex("xylocopa"))  ~ "Xylocopa",
+    str_detect(subgenus, regex("ceratina"))  ~ "Ceratina",
+    str_detect(subgenus, regex("osmia"))     ~ "Osmia",
+    str_detect(subgenus, regex("coelioxys")) ~ "Coelioxys",
+    str_detect(subgenus, regex("amegilla"))   ~ "Amegilla",
+    str_detect(subgenus, regex("apis"))      ~ "Apis",
+    str_detect(subgenus, regex("eucera"))    ~ "Eucera",
+    str_detect(subgenus, regex("anthophora"))    ~ "Anthophora",
+    # Manual assignments
+    subgenus == "Sphecodogastra"      ~ "Lasioglossum",   
+    subgenus == "Chalicodoma"         ~ "Megachile",
+    subgenus == "Copoxyla"            ~ "Xylocopa",
+    subgenus == "Eutricharaea"        ~ "Megachile",
+    subgenus == "Anodonteutricharaea" ~ "Megachile",
+    subgenus == "Xanthosarus"         ~ "Megachile",
+    subgenus == "Bombias"             ~ "Bombus",
+    subgenus == "Hexataenites"        ~ "Halictus",
+    subgenus == "Lambdopsis"          ~ "Hylaeus",
+    subgenus == "Dentigera"           ~ "Hylaeus",
+    subgenus == "Paraprosopis"        ~ "Hylaeus",
+    subgenus == "Spatulariella"       ~ "Hylaeus",
+    subgenus == "Anthocopa"           ~ "Hoplitis",
+    subgenus == "Alcidamea"           ~ "Hoplitis",
+    subgenus == "Petalosternon"       ~ "Anthophora",
+    subgenus == "Koptortosoma"        ~ "Xylocopa",
+    subgenus == "Lophanthophora"      ~ "Anthophora",
+    subgenus == "Pyganthophora"       ~ "Anthophora",
+    subgenus == "Melanapis"           ~ "Andrena",
+    subgenus == "Pseudapis"           ~ "Pseudapis",  
+    TRUE ~ NA_character_ ))
+
+# Subset
+names_subset <- names[names$Pol_original %in% acc_gbif$verbatim_name, ]
+
+# Genus
+names_subset$genus <- subgenus_to_genus$genus[match(names_subset$Pol_original, subgenus_to_genus$subgenus)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$genus)] <- "Subgenus"
+names_subset$key <- acc_gbif$genusKey[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# These will include the accepted name to the highest level
+names_subset$bee_name <- acc_gbif$canonicalName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$rank[grepl(".*\\((.*)\\).*", names_subset$old_name)] <- "Subgenus"
+names_subset$bee_name_scientific <- acc_gbif$scientificName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+
+# Assign family
+fam <- data.frame(genus =unique(names_subset$genus),
+                  family =c("Halictidae","Andrenidae", "Halictidae", "Apidae","Megachilidae", "Apidae", "Megachilidae", "Apidae", "Apidae", "Apidae","Apidae",    
+                            "Megachilidae", "Megachilidae", "Colletidae", "Apidae", "Megachilidae"))
+
+names_subset$family <- fam$family[match(names_subset$genus, fam$genus)]
+
+# Add
+names[names$Pol_original %in% acc_gbif$verbatim_name, ] <- names_subset
+
+
+
+
+##########
+# REMAINING
+gbif_remaining <- gbif[!gbif$verbatim_name %in% names$Pol_original[!is.na(names$key)],]
+acc_gbif <- gbif_remaining[gbif_remaining$matchType %in% "VARIANT" ,]
+
+# Subset
+names_subset <- names[names$Pol_original %in% acc_gbif$verbatim_name, ]
+
+# Add subspecies
+names_subset$subspecies <- acc_gbif$final[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$rank[!is.na(names_subset$subspecies)] <- "Subspecies"
+names_subset$key <- acc_gbif$final_key[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# Species
+names_subset$species <- acc_gbif$species[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$key[is.na(names_subset$rank) & !is.na(names_subset$species)] <- 
+  acc_gbif$speciesKey[match(names_subset$Pol_original[is.na(names_subset$rank) & !is.na(names_subset$species)], acc_gbif$verbatim_name)]
+names_subset$rank[is.na(names_subset$rank) & !is.na(names_subset$species)] <- "Species"
+# Genus
+names_subset$genus <- acc_gbif$genus[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# Family
+names_subset$family <- acc_gbif$family[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+# Canonical name
+names_subset$bee_name <- acc_gbif$canonicalName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+names_subset$bee_name_scientific <- acc_gbif$scientificName[match(names_subset$Pol_original, acc_gbif$verbatim_name)]
+
+# Add
+names[names$Pol_original %in% acc_gbif$verbatim_name, ] <- names_subset
+
+
+
+##########
+# TRIBES and SUBFAMILY
+# Subset
+names_subset <- names[(grepl("ni$", names$Pol_original) | grepl("nae$", names$Pol_original)) & is.na(names$key),] 
+names_subset <- names_subset[!names_subset$Pol_original %in% c("Bombus konradini"),]  
+
+# Assign the ranks
+names_subset$rank[grepl("ni$", names_subset$Pol_original)] <- "Tribe"
+names_subset$rank[grepl("nae$", names_subset$Pol_original)] <- "Subfamily"
+
+# Assign bee name
+names_subset$bee_name <- names_subset$Pol_original
+
+taxonomy <- data.frame( group = c("Rophitinae","Apinae","Megachilinae","Melectini",
+    "Andreninae","Nomadini","Lithurginae","Xylocopini",
+    "Nomioidinae","Bombini","Nomiinae","Xylocopinae",
+    "Epeolini","Hylaeinae","Colletinae","Andrenini",
+    "Melittinae","Dioxyini","Dasypodaini","Ammobatini",
+    "Euglossini", "Anthidiini", "Anthophorini","Eucerini","Halictinae",
+    "Halictini","Megachilini","Nomadinae","Osmiini","Panurginae","Panurgini", "Eucerinae",
+    "Nomioidini", "Meliponini","Anthophorinae "),
+  family = c("Halictidae","Apidae","Megachilidae","Apidae",
+    "Andrenidae","Apidae","Megachilidae","Apidae",
+    "Halictidae","Apidae","Halictidae","Apidae",
+    "Apidae","Colletidae","Colletidae","Andrenidae",
+    "Melittidae","Megachilidae","Melittidae","Apidae",
+    "Apidae", "Megachilidae", "Apidae","Apidae", "Halictidae",
+    "Halictidae", "Megachilidae", "Apidae", "Megachilidae", "Andrenidae","Andrenidae", "Apidae",
+    "Halictidae","Apidae","Apidae"))
+
+# Assign
+names_subset$family <- taxonomy$family[match(names_subset$Pol_original, taxonomy$group)]
+
+# Add
+names[names$Pol_original %in% names_subset$Pol_original ,] <- names_subset
+
+
+
+
+##########
+# REMAINING
+names_subset <- names[is.na(names$bee_name), ]
+gbif_remaining <- gbif[!gbif$verbatim_name %in% names$Pol_original[!is.na(names$bee_name)] ,]
+
+# Some data is already assigned at the genus level
+names_data <- names[!is.na(names$bee_name),]
+names_subset <- names_subset[names_subset$Pol_original %in% names_data$genus,]
+
+names_subset$genus <- names_data$genus[match(names_subset$Pol_original, names_data$genus)]
+names_subset$family <- names_data$family[match(names_subset$Pol_original, names_data$genus)]
+names_subset$rank <- "Genus"
+names_subset$bee_name <- names_data$genus[match(names_subset$Pol_original, names_data$genus)]
+
+# Add
+names[names$Pol_original %in% names_subset$Pol_original ,] <- names_subset
+
+
+
+
+
+##########
+# REMAINING
+names_subset <- names[is.na(names$bee_name), ]
+gbif_remaining <- gbif[!gbif$verbatim_name %in% names$Pol_original[!is.na(names$bee_name)] ,]
+
+# Assign some extra
+taxonomy_lookup <- data.frame(
+  taxon = c("Prosopis","Chlorandrena","Pteneucera", "Paracoelioxys","Panurgina","Rozeniana","Panurginina","Apidae", "Collicula",
+            "Eupavlovskia","Heliophila", "Nomiapis", "Acrosmia", "Trigona"),
+  genus = c(  "Hylaeus", "Andrena","Eucera", "Coelioxys", NA,"Coelioxys",NA, NA,
+              "Nomada", "Eupavlovskia","Anthophora", "Pseudapis", "Hoplitis",
+              "Trigona"),
+  family = c( "Colletidae","Andrenidae","Apidae", "Megachilidae", "Andrenidae",  "Megachilidae","Andrenidae", "Apidae", "Apidae","Apidae","Apidae", "Halictidae",
+              "Megachilidae", "Apidae"),
+  rank = c(  "Subgenus", "Subgenus", "Subgenus", "Subgenus", "Subtribe", "Subgenus","Subtribe", "Family", "Subgenus", "Genus", "Subgenus", "Genus",
+             "Subgenus", "Genus"))
+
+# Assign
+names_subset$genus <- taxonomy_lookup$genus[match(names_subset$Pol_original, taxonomy_lookup$taxon)]
+names_subset$family <- taxonomy_lookup$family[match(names_subset$Pol_original, taxonomy_lookup$taxon)]
+names_subset$rank <- taxonomy_lookup$rank[match(names_subset$Pol_original, taxonomy_lookup$taxon)]
+names_subset$bee_name <- taxonomy_lookup$taxon[match(names_subset$Pol_original, taxonomy_lookup$taxon)]
+
+# Add
+names[is.na(names$bee_name), ] <- names_subset
+
+
+
+##########
+# REMAINING
+names_subset <- names[is.na(names$bee_name), ]
+names_subset$species <- names_subset$Pol_original
+
+# Change some
+names_subset$species[names_subset$Pol_original %in% c("Amegilla quadrifasciata maderae")] <- "Stelis ornatula"
+names_subset$species[names_subset$Pol_original %in% c("Nomiapis monstrosa")] <- "Pseudapis monstrosa"
+# Get genus
+names_subset$genus <- vegdata::parse.taxa(names_subset$species)[[2]]
+# Get family
+names_data <- names[!is.na(names$bee_name),]
+fam <- names_data |> distinct(genus, family)
+names_subset$family <- fam$family[match(names_subset$genus, fam$genus)]
+# Assign rank
+names_subset$rank <- "Species"
+names_subset$rank[names_subset$Pol_original %in% c("Lasioglossum fulvicorne-fratellum")] <- "Aggregate"
+names_subset$bee_name <- names_subset$species
+
+# Add
+names[is.na(names$bee_name), ] <- names_subset
+
+# Save version before changes
+names_save <- names
+```
+
+
+## 2.2 Changes
+```{r}
+# Change aggregates
+names$rank[grepl("/", names$old_name)] <- "Aggregate"
+names$rank[grepl("-gr.", names$old_name)] <- "Aggregate"
+
+# We will save the complexes to the bee name but remove from the species column
+# We than have to remove the key and scientific name as well
+names$species[grepl("/", names$old_name)] <-  NA
+names$species[names$old_name %in% "Lasioglossum fulvicorne-fratellum"] <-  NA
+names$bee_name[grepl("/", names$old_name)] <- names$old_name[grepl("/", names$old_name)]
+names$bee_name[names$old_name %in% "Lasioglossum fulvicorne-fratellum"] <-  "Lasioglossum fratellum/subfulvicorne"
+names$bee_name_scientific[grepl("/", names$old_name)] <- NA
+names$key[grepl("/", names$old_name)] <- NA
+
+
+# Look at whether there are differences in bee name and species
+check <- names[!is.na(names$species),]
+check <- check[check$species != check$bee_name,]
+
+# This one is wrong in gbif, (a vs us), we will just keep the name here (then in corresponds at the species level)
+names$subspecies[names$old_name %in% "Halictus subauratus corsa"] <- "Halictus subauratus corsa"
+names$bee_name[names$old_name %in% "Halictus subauratus corsa"] <- "Halictus subauratus corsa"
+names$bee_name_scientific[names$old_name %in% "Halictus subauratus corsa"] <- "Halictus subauratus corsa Blüthgen, 1933"
+names$rank[names$old_name %in% "Halictus subauratus corsa"] <- "Subspecies"
+
+# Fix some errors
+names$subspecies[names$old_name %in% "Anthidium melanopygum"] <- "Anthidium spiniventre melanopygum"
+names$species[names$old_name %in% "Anthidium melanopygum"] <- "Anthidium spiniventre"
+names$species[names$old_name %in% "Anthidium melanopygum"] <- "Anthidium spiniventre"
+names$rank[names$old_name %in% "Anthidium melanopygum"] <- "Subspecies"
+names$bee_name[names$old_name %in% "Anthidium melanopygum"] <- "Anthidium spiniventre melanopygum"
+names$bee_name_scientific[names$old_name %in% "Anthidium melanopygum"] <- "Anthidium spiniventre melanopygum Friese, 1917"
+names$key[names$old_name %in% "Anthidium melanopygum"] <- NA
+
+# Fix some errors
+names$species[names$old_name %in% "Eucera terminata"] <- "Eucera terminata"
+names$bee_name[names$old_name %in% "Eucera terminata"] <- "Eucera terminata"
+names$bee_name_scientific[names$old_name %in% "Eucera terminata"] <- "Eucera terminata Pérez, 1895"
+names$key[names$old_name %in% "Eucera terminata"] <- NA
+
+# Fix other errors
+names$subspecies[names$old_name %in% "Lasioglossum laticeps hellenicum"] <- "Lasioglossum laticeps hellenicum"
+names$bee_name[names$old_name %in% "Lasioglossum laticeps hellenicum"] <- "Lasioglossum laticeps hellenicum"
+names$bee_name_scientific[names$old_name %in% "Lasioglossum laticeps hellenicum"] <- "Lasioglossum laticeps hellenicum Blüthgen, 1937"
+names$rank[names$old_name %in% "Lasioglossum laticeps hellenicum"] <- "Subspecies"
+names$key[names$old_name %in% "Lasioglossum laticeps hellenicum"] <- NA
+
+# Look at whether there are differences in bee name and species
+check <- names[!is.na(names$genus),]
+check <- check[check$genus != check$bee_name & check$rank %in% "Genus",]
+names$bee_name[names$Pol_original %in% "Nomiapis"] <- "Pseudapis"
+
+# Some other errors
+# Seladonia
+names$species[names$old_name %in% "Halictus submediterraneus"] <- "Halictus submediterraneus"
+names$genus[names$old_name %in% "Halictus submediterraneus"] <- "Halictus"
+names$rank[names$old_name %in% "Halictus submediterraneus"] <- "Species"
+names$bee_name[names$old_name %in% "Halictus submediterraneus"] <- "Halictus submediterraneus"
+names$bee_name_scientific[names$old_name %in% "Halictus submediterraneus"] <- "Halictus submediterraneus Pauly, 2015"
+names$key[names$old_name %in% "Halictus submediterraneus"] <- NA
+names$genus[names$Pol_original %in% "Seladonia"] <- "Halictus"
+names$bee_name[names$Pol_original %in% "Seladonia"] <- "Halictus"
+names$bee_name_scientific[names$Pol_original %in% "Seladonia"] <- "Halictus Latreille, 1804"
+names$key[names$Pol_original %in% "Seladonia"] <- NA
+
+# Megachile schmiedeknechti
+names$species[names$old_name %in% "Megachile argentata schmiedeknechti"] <- "Megachile schmiedeknechti"
+names$bee_name[names$old_name %in% "Megachile argentata schmiedeknechti"] <- "Megachile schmiedeknechti"
+names$bee_name_scientific[names$old_name %in% "Megachile argentata schmiedeknechti"] <- "Megachile schmiedeknechti Costa, 1884"
+names$key[names$old_name %in% "Megachile argentata schmiedeknechti"] <- NA
+```
+
+
+## 2.3 Check
+```{r}
+###### 
+# Incorrect families
+# Check for duplicated genera with different families
+dup <- names |> distinct(genus, family)
+dup <- dup[duplicated(dup$genus) | duplicated(dup$genus, fromLast = T),]
+dup <- dup[order(dup$genus),]
+names$family[names$genus %in% dup$genus[1]] <- "Halictidae"
+
+# Check whether these are all bee families
+dup <- names[!names$family %in% c("Apidae","Melittidae","Megachilidae","Colletidae","Halictidae","Andrenidae"),]
+# Change a tribe
+names$family[names$Pol_original %in% "Ceratinini"] <- "Apidae"
+names$rank[names$Pol_original %in% "Ceratinini"] <- "Tribe"
+names$bee_name_scientific[names$Pol_original %in% "Ceratinini"] <- NA
+names$bee_name[names$Pol_original %in% "Ceratinini"] <- "Ceratinini"
+# Change a subtribe
+names$rank[names$Pol_original %in% "Halictina"] <- "Subtribe"
+names$genus[names$Pol_original %in% "Halictina"] <- NA
+
+# Remove some
+remove <- c("Anthophila","Sphecodina")
+names <- names[!names$old_name %in% remove, ]
+all_data <- all_data[!all_data$Pol_original %in% remove,]
+# Assign some extra
+taxonomy_lookup <- data.frame(
+  taxon = c("Mellitoides","Anthophorinae","Leucandrena", "Panurgina"),
+  genus = c("Andrena",NA,"Andrena",  NA),
+  family = c("Andrenidae","Apidae" , "Andrenidae", "Andrenidae"),
+  rank = c("Subgenus", "Subfamily","Subgenus", "Subtribe"))
+
+# Assign
+names$genus[names$Pol_original %in% dup$Pol_original] <- taxonomy_lookup$genus[match(names$Pol_original[names$Pol_original %in% dup$Pol_original], taxonomy_lookup$taxon)]
+names$family[names$Pol_original %in% dup$Pol_original] <- taxonomy_lookup$family[match(names$Pol_original[names$Pol_original %in% dup$Pol_original], taxonomy_lookup$taxon)]
+names$rank[names$Pol_original %in% dup$Pol_original] <- taxonomy_lookup$rank[match(names$Pol_original[names$Pol_original %in% dup$Pol_original], taxonomy_lookup$taxon)]
+names$bee_name[names$Pol_original %in% dup$Pol_original] <- taxonomy_lookup$taxon[match(names$Pol_original[names$Pol_original %in% dup$Pol_original], taxonomy_lookup$taxon)]
+names$key[names$Pol_original %in% dup$Pol_original] <- NA
+
+
+
+###### 
+# Unidentified ranks
+dup <- names[is.na(names$Pollinator_rank),]
+
+
+
+###### 
+# Incorrect species
+dup <- names |> distinct(species, genus, family)
+dup <- dup[duplicated(dup$species) | duplicated(dup$species, fromLast = T),]
+dup <- dup[order(dup$species) & !is.na(dup$species),]
+
+
+
+
+###### 
+# Incorrect subspecies
+dup <- names |> distinct(subspecies, species, genus, family)
+dup <- dup[duplicated(dup$subspecies) | duplicated(dup$subspecies, fromLast = T),]
+dup <- dup[!is.na(dup$subspecies),]
+# None are found to be incorrect
+
+
+
+
+###### 
+# Incorrect ranks
+dup <- names |> distinct(bee_name,  species, genus, family)
+dup <- dup[duplicated(dup$bee_name) | duplicated(dup$bee_name, fromLast = T),]
+dup <- dup[order(dup$bee_name),]
+
+
+###### 
+# Check one last time 
+dup <- names |> distinct(bee_name,  species, genus, family, old_name)
+dup <- dup[duplicated(dup$old_name) | duplicated(dup$old_name, fromLast = T),]
+dup <- dup[order(dup$bee_name),]
+
+# Change a tribe again (keeps giving errors)
+names$family[names$Pol_original %in% "Ceratinini"] <- "Apidae"
+names$rank[names$Pol_original %in% "Ceratinini"] <- "Tribe"
+names$bee_name_scientific[names$Pol_original %in% "Ceratinini"] <- NA
+names$bee_name[names$Pol_original %in% "Ceratinini"] <- "Ceratinini"
+
+
+names_save <- names
+
+###### 
+# get unique dataframe
+bee_names <-  names_save |> distinct(bee_name, bee_name_scientific, key, rank, subspecies, species, genus, family, old_name)
+```
+
+
+```{r}
+########
+# We will look whether we can assign new ID's or accepted names
+non_acc <- bee_names[is.na(bee_names$bee_name_scientific),]
+# Look for accepted names
+acc <-  bee_names[!is.na(bee_names$bee_name_scientific),]
+
+# Assign
+non_acc$bee_name_scientific <- acc$bee_name_scientific[match(non_acc$bee_name, acc$bee_name)]
+non_acc$key <- acc$key[match(non_acc$bee_name, acc$bee_name)]
+
+# Assign
+non_acc$key <- as.integer(as.character(non_acc$key))
+bee_names[is.na(bee_names$bee_name_scientific),] <- non_acc
+
+
+# Assign also keys for genera etc
+non_acc <- bee_names[is.na(bee_names$bee_name_scientific) & !bee_names$rank %in% c("Aggregate"),]
+gbif <-  name_backbone_checklist(non_acc$bee_name[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(non_acc$bee_name)/2*(i-1))
+  end <- floor(length(non_acc$bee_name)/2 * i)
+  # run 
+  data <- name_backbone_checklist(non_acc$bee_name[begin: end])
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+
+# We can add one more
+gbif_acc <- gbif[gbif$matchType %in% "EXACT" & gbif$kingdom %in% "Animalia",]
+bee_names$key[is.na(bee_names$key)] <- gbif_acc$usageKey[match(bee_names$bee_name[is.na(bee_names$key)], gbif_acc$verbatim_name)]
+bee_names$bee_name_scientific[is.na(bee_names$key)] <- gbif_acc$scientificName[match(bee_names$bee_name[is.na(bee_names$key)], gbif_acc$verbatim_name)]
+
+
+gbif <- data.frame()
+######
+# Get the remaining GBIF ID's
+# Maybe better to also remove subfamilies and tribes, the function does not get these
+non_acc <- bee_names[is.na(bee_names$bee_name_scientific) & !bee_names$rank %in% c("Aggregate", "Tribe","Subtribe","Subfamily", "Subgenus"),]
+non_acc <- non_acc[!duplicated(non_acc$bee_name),]
+gbif <-  data.frame(name = non_acc$bee_name[1], gbif = get_gbifid(non_acc$bee_name[1])[[1]])
+for(i in 1: nrow(non_acc)){
+  # run 
+  data <- data.frame(name = non_acc$bee_name[i], gbif = get_gbifid(non_acc$bee_name[i])[[1]])
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+gbif_ids <- gbif
+
+# Here we manually have to assign some, numbers are 2 1 2 1 1 NA NA 2 NA 2 NA NA 2 
+non_acc$key <- gbif$gbif[match(non_acc$bee_name ,gbif$name,)]
+non_acc$bee_name_new <- NA
+
+# Check the species in gbif
+for(i in 1: nrow(non_acc)){
+  # run 
+  if(is.na(non_acc$key[i])) next
+  acc <- name_usage( key = non_acc$key[i])
+  non_acc$bee_name_scientific[i] <- acc$data$scientificName
+  non_acc$bee_name_new[i] <- acc$data$canonicalName
+}
+
+# Remove the uncertain ones
+non_acc$bee_name_scientific[is.na(non_acc$key)] <- NA
+uncertain <- non_acc[non_acc$bee_name != non_acc$bee_name_new & !is.na(non_acc$bee_name_scientific),]
+uncertain <- uncertain[!uncertain$bee_name %in% "Lasioglossum laticeps hellenicum",]
+non_acc$bee_name_scientific[non_acc$bee_name %in% uncertain$bee_name] <- NA
+non_acc$key[non_acc$bee_name %in% uncertain$bee_name] <- NA
+# How many are now assigned
+sum(!is.na(non_acc$key))
+
+# Remove one plant
+non_acc$bee_name_scientific[non_acc$bee_name %in% "Heliophila"] <- "Heliophila Klug, 1807"
+non_acc$key[non_acc$bee_name %in% "Heliophila"] <- NA
+
+
+
+# Assign also keys for genera etc
+non_acc_assign <- bee_names[is.na(bee_names$bee_name_scientific) & !bee_names$rank %in% c("Aggregate"),]
+non_acc_assign$bee_name_scientific <- non_acc$bee_name_scientific[match(non_acc_assign$bee_name, non_acc$bee_name)]
+non_acc_assign$key <- non_acc$key[match(non_acc_assign$bee_name, non_acc$bee_name)]
+
+# Assign
+non_acc_assign$key <- as.integer(as.character(non_acc_assign$key))
+bee_names[is.na(bee_names$bee_name_scientific)& !bee_names$rank %in% c("Aggregate") ,] <- non_acc_assign
+
+
+####
+#Tribe, subtribe and subfamily
+bee_names$key[bee_names$rank %in% c("Tribe","Subtribe","Subfamily")] <- NA
+bee_names$bee_name_scientific[bee_names$rank %in% c("Tribe","Subtribe","Subfamily")] <- NA
+bee_names$genus[bee_names$rank %in% c("Tribe","Subtribe","Subfamily")] <- NA
+
+
+
+### 
+# Another change
+bee_names$bee_name_scientific[bee_names$old_name %in% c("Bombus konradini")] <- "Bombus lapponicus konradini Reinig, 1965"
+bee_names$subspecies[bee_names$old_name %in% c("Bombus konradini")] <- "Bombus lapponicus konradini"
+bee_names$species[bee_names$old_name %in% c("Bombus konradini")] <- "Bombus lapponicus"
+bee_names$bee_name[bee_names$old_name %in% c("Bombus konradini")] <- "Bombus lapponicus konradini"
+
+
+
+####
+# How many remain
+non_acc <- bee_names[is.na(bee_names$bee_name_scientific) & !bee_names$rank %in% c("Aggregate", "Tribe","Subtribe","Subfamily", "Subgenus"),]
+
+# Assign scientific names that are for some reason not found
+change <- data.frame(bee_name = non_acc$bee_name[order(non_acc$rank)],
+                     science = c("Eupavlovskia Popov, 1955", "Trigona (Ktinotrofia) Engel, 2021","Eupavlovskia Popov, 1955",
+                                 "Eupavlovskia obscura (Friese, 1895)","Lasioglossum haesitans (Blüthgen, 1931)","Eucera terminata Pérez, 1895",NA, NA,
+                                 "Eupavlovskia funeraria (Smith, 1854)",NA, NA, NA, "Andrena taedium Wood, 2023" ))
+
+# Assign
+bee_names$bee_name_scientific[bee_names$bee_name %in% change$bee_name] <- change$science[match(bee_names$bee_name[bee_names$bee_name %in% change$bee_name], change$bee_name)]
+
+# How many keys and scientific names do we have
+length(unique(bee_names$key))
+length(unique(bee_names$bee_name_scientific))
+length(unique(bee_names$bee_name))
+
+# Save
+write_csv(bee_names, "../Results/Bee_name_all_last_version.csv")
+```
+
+
+
+
+
+
+## 2.4 Save
+```{r}
+# Assign
+all_data$Bee_accepted_name <- bee_names$bee_name[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_accepted_scientific_name <- bee_names$bee_name_scientific[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_subspecies <- bee_names$subspecies[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_species <- bee_names$species[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_genus <- bee_names$genus[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_family <- bee_names$family[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_GBIF_key <- bee_names$key[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_rank <- bee_names$rank[match(all_data$Pol_original, bee_names$old_name)]
+
+#write_csv(all_data, "../Results/Bees_all_observations.csv")
+```
+
+
+
+# PLANTNET
+## 3.1 Load data
+```{r}
+# Get those observation in current dataset
+pol_plantnet <- pol_plantnet[pol_plantnet$ID %in% all_data$Obs_ID,]
+
+# Get unique identifications
+plantnet <- pol_plantnet |> group_by(Name, Genus, Family, GBIF_ID, POWO_ID, IUCN_ID) |> summarise(n =n(), rel = mean(Score, na.rm=T))
+```
+
+
+## 3.2 GBIF
+```{r}
+# Names save
+names_plantnet <- plantnet
+# Assign GBIF names based on data
+for(i in 1: nrow(names_plantnet)){
+  if(is.na(names_plantnet$GBIF_ID[i])) next
+
+  # Get synonym data
+  acc <- name_usage( key = names_plantnet$GBIF_ID[i])
+  # Add name of accepted species
+  names_plantnet$GBIF[i] <- acc$data$canonicalName
+  names_plantnet$GBIF_genus[i] <- acc$data$genus
+  names_plantnet$GBIF_family[i] <- acc$data$family
+  names_plantnet$GBIF_rank[i] <- acc$data$rank
+  names_plantnet$GBIF_kingdom[i] <- acc$data$kingdom
+  names_plantnet$GBIF_Status[i] <- acc$data$taxonomicStatus
+  names_plantnet$GBIF_species[i] <- acc$data$species
+  names_plantnet$GBIF_accepted[i] <- acc$data$scientificName
+
+  
+  # Add subspecies or variety
+  if ("subspecies" %in% names(acc$data)) {
+    names_plantnet$GBIF_subspecies[i] <- acc$data$subspecies
+    } else {
+    NA_character_
+    }
+  if ("variety" %in% names(acc$data)) {
+    names_plantnet$GBIF_subspecies[i] <- acc$data$variety
+    } else {
+    NA_character_
+  }
+}
+
+# Save to be certain for later because it takes a long time
+names_plantnet_saved <- names_plantnet
+```
+
+
+## 3.3 ASSIGN
+### Accepted
+```{r}
+# Get the saved version again (in case we made errors previously)
+names_plantnet <- names_plantnet_saved
+# Create a validated column
+names_plantnet$validated <- NA
+
+########
+# ACCEPTED
+# Add all thise for which GBIF has accepted
+names_plantnet$validated[names_plantnet$GBIF_Status %in% "ACCEPTED" & !is.na(names_plantnet$GBIF_ID)] <- T
+# Remove data for which GBIF did not assign an accepted name
+names_plantnet[is.na(names_plantnet$GBIF_ID), 9:15] <- NA
+
+# 1157 species still have to be validated
+sum(is.na(names_plantnet$validated))
+
+# Assign 
+names_plantnet$GBIF_subspecies <- NA
+```
+
+### Synonyms
+```{r}
+# Synonyms
+syn <- names_plantnet[names_plantnet$GBIF_Status == "SYNONYM" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),]
+sum(is.na(syn$validated))
+
+# Check whether none are subspecies
+gbif <-  name_backbone_checklist(syn$Name[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(syn$GBIF)/2*(i-1))
+  end <- floor(length(syn$GBIF)/2 * i)
+  # run 
+  data <- name_backbone_checklist(syn$GBIF[begin: end])
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+
+# Save
+gbif_two <- gbif
+gbif <- gbif_two
+
+# Check overall name
+gbif$final <- gbif$variety
+gbif$final[is.na(gbif$final)] <- gbif$subspecies[is.na(gbif$final)]
+
+# Assign scientific name
+gbif$scientificName[!is.na(gbif$acceptedScientificName)] <- gbif$acceptedScientificName[!is.na(gbif$acceptedScientificName)]
+gbif$usageKey[!is.na(gbif$acceptedUsageKey)] <- gbif$acceptedUsageKey[!is.na(gbif$acceptedUsageKey)]
+
+
+# Assign
+gbif_syn <- gbif[!is.na(gbif$status) & gbif$matchType %in% "EXACT",]
+syn[, 10:18] <- NA
+# Subspecies
+syn$GBIF_subspecies <- gbif_syn$final[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_rank[!is.na(syn$GBIF_subspecies)] <- "SUBSPECIES"
+syn$GBIF[!is.na(syn$GBIF_subspecies)] <- syn$GBIF_subspecies[!is.na(syn$GBIF_subspecies)] 
+syn$GBIF_ID[!is.na(syn$GBIF_subspecies)] <- gbif_syn$usageKey[match(syn$Name[!is.na(syn$GBIF_subspecies)], gbif_syn$verbatim_name)]
+syn$GBIF_accepted[!is.na(syn$GBIF_subspecies)] <- gbif_syn$scientificName[match(syn$Name[!is.na(syn$GBIF_subspecies)], gbif_syn$verbatim_name)]
+syn$validated[!is.na(syn$GBIF_subspecies)] <- T
+
+# Species
+syn$GBIF_species <- gbif_syn$species[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_genus<- gbif_syn$genus[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_family <- gbif_syn$family[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_rank[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)] <- "SPECIES"
+syn$GBIF[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$species[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$GBIF_ID[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$usageKey[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$GBIF_accepted[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$scientificName[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$validated[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)] <- T
+syn$validated[is.na(syn$Genus)] <- NA
+
+
+
+########
+# Check some errors by looking at correspondance at name level
+gbif$final[is.na(gbif$final)] <- gbif$species[is.na(gbif$final)]
+syn_correct <- syn[syn$GBIF %in% gbif$final,]
+# These should be correct and will be considered validated
+
+# But species vary for some
+check <- names_plantnet[names_plantnet$GBIF %in% syn_correct$GBIF & is.na(names_plantnet$validated),] 
+check <- check[check$GBIF != check$GBIF_species,]
+change <- data.frame(old = check$GBIF, new = check$GBIF_species)
+# 41 have to be changed
+# Check all species combinations, some are correct (keep), some have to be further changed
+keep <- change[c(2,3,9,10,11,13, 18, 20, 24, 28, 34,40),]
+other <- change[c(6, 17,19 ,21, 25,30,31:33,35,39),]
+change <- change[-c(2,3,9,10,11,13, 18, 20, 24, 28, 40, 6, 17,19 ,21, 25,30,31:33,35,39),]
+
+
+# Update the other
+other$final <- c("Erigeron glabratus occidentalis","Eruca vesicaria sativa", "Francoa appendiculata sonchifolia",
+                 "Harrisia fragrans aboriginum", "Aphyllon cooperi cooperi", "Pulicaria arabica hispanica", "Ficaria verna verna",
+                 "Rosa canina biserrata", "Rosa canina biserrata", "Rumex pratensis pratensis", "Betonica officinalis officinalis")
+syn$GBIF_subspecies[syn$GBIF %in% other$old] <- other$final[match(syn$GBIF[syn$GBIF %in% other$old], other$old)]
+syn$GBIF_species[syn$GBIF %in% other$old] <- paste(vegdata::parse.taxa(other$final[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]],
+                                                       vegdata::parse.taxa(other$final[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[3]])
+syn$GBIF_genus[syn$GBIF %in% other$old] <- (vegdata::parse.taxa(other$final[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]])
+syn$GBIF[syn$GBIF %in% other$old] <- syn$GBIF_subspecies[syn$GBIF %in% other$old]
+syn$GBIF_subspecies[syn$GBIF_subspecies == syn$GBIF_species] <- NA
+syn$GBIF_rank[syn$GBIF %in% other$final] <- "SUBSPECIES"
+syn$GBIF_accepted[syn$GBIF %in% other$final] <- NA
+syn$GBIF_ID[syn$GBIF %in% other$final] <- NA
+syn$validated[syn$GBIF %in% other$final] <- T
+
+# Change the last
+syn$GBIF_species[syn$GBIF %in% change$old] <- change$new[match(syn$GBIF[syn$GBIF %in% change$old], change$old)]
+syn$GBIF_genus[syn$GBIF %in% change$old] <- (vegdata::parse.taxa(change$new[match(syn$GBIF[syn$GBIF %in% change$old], change$old)])[[2]])
+syn$GBIF_rank[syn$GBIF %in% change$old] <- "SPECIES"
+syn$GBIF[syn$GBIF %in% change$old] <- change$new[match(syn$GBIF[syn$GBIF %in% change$old], change$old)]
+syn$GBIF_accepted[syn$Name %in% change$old] <- NA
+syn$GBIF_ID[syn$Name %in% change$old] <- NA
+syn$validated[syn$Name %in% change$old] <- T
+
+
+# How many remain
+sum(is.na(syn$validated))
+sum(is.na(syn$GBIF_ID))
+
+
+
+
+########
+# Some did not correspond at subspecies level
+syn_incorrect <- syn[!syn$GBIF %in% gbif$final,]
+
+# So removes the different species
+gbif_incorrect <- gbif[!gbif$final %in% syn$GBIF,]
+
+# Reduce dataset to change everything in for safety
+check <- names_plantnet[names_plantnet$GBIF %in% syn_incorrect$GBIF & is.na(names_plantnet$validated),] 
+
+# Add subspecies
+gbif_subsp <- gbif_incorrect[!is.na(gbif_incorrect$variety) | ! is.na(gbif_incorrect$subspecies),]
+syn$GBIF_subspecies[is.na(syn$validated)] <- gbif_subsp$final[match(syn$GBIF[is.na(syn$validated)], gbif_subsp$verbatim_name)]
+syn$GBIF_ID[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)] <- gbif_subsp$usageKey[match(syn$GBIF[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)],
+                                                                                            gbif_subsp$verbatim_name)]
+syn$GBIF_species[!is.na(syn$GBIF_subspecies) & is.na(syn$validated)]<- paste(vegdata::parse.taxa(syn$GBIF_subspecies[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)])[[2]],
+                                                                             vegdata::parse.taxa(syn$GBIF_subspecies[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)])[[3]])
+syn$GBIF_genus[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)] <- paste(vegdata::parse.taxa(syn$GBIF_subspecies[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)])[[2]])
+syn$GBIF[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)] <- syn$GBIF_subspecies[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)]
+syn$GBIF_rank[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)] <- "SUBSPECIES"
+syn$validated[!is.na(syn$GBIF_subspecies)& is.na(syn$validated)] <- T
+
+
+# Look at species
+gbif_incorrect <-  gbif[!gbif$final %in% syn$GBIF,]
+gbif_species <- gbif_incorrect[gbif_incorrect$matchType %in% "EXACT",]
+syn$GBIF_species[is.na(syn$validated)] <- gbif_species$final[match(syn$GBIF[is.na(syn$validated)], gbif_species$verbatim_name)]
+syn$GBIF_ID[is.na(syn$validated)] <- gbif_species$usageKey[match(syn$GBIF[is.na(syn$validated)], gbif_species$verbatim_name)]
+syn$GBIF_genus[!is.na(syn$GBIF_species)& is.na(syn$validated)] <- paste(vegdata::parse.taxa(syn$GBIF_species[!is.na(syn$GBIF_species)& is.na(syn$validated)])[[2]])
+syn$GBIF[!is.na(syn$GBIF_species)& is.na(syn$validated)] <- syn$GBIF_species[!is.na(syn$GBIF_species)& is.na(syn$validated)]
+syn$GBIF_rank[!is.na(syn$GBIF_species)& is.na(syn$validated)] <- "SPECIES"
+syn$validated[!is.na(syn$GBIF_species)& is.na(syn$validated)] <- T
+
+
+# How many remain
+sum(is.na(syn$validated))
+
+
+# Which remain
+gbif_incorrect <-  gbif[gbif$verbatim_name %in% syn$Name[is.na(syn$validated)],]
+
+# Assign
+syn_empty <- syn[is.na(syn$validated),]
+# Change
+other <- data.frame(old = syn_empty$Name, GBIF = syn_empty$GBIF)
+
+# Add
+other$new_name <- c(NA, NA, "Alchemilla arvensis", "Lachemilla pinnata",
+                     "Calamagrostis arenaria", "Mahonia japonica", 
+                     "Centaurea triumfettii semidecurrens", 
+                     "Tarenaya spinosa", NA, "Crataegus coccinea",
+                     "Culcitium canescens", 
+                     "Pardoglossum cheirifolium cheirifolium", NA, NA,
+                     "Draba verna", NA, NA, NA, NA, 
+                     "Cynanchum insipidum", NA,
+                     "Xanthoselinum alsaticum alsaticum", NA, NA,
+                     "Rosa canina biserrata", NA, NA, "Petrosedum sediforme",
+                     "Sedum candolleanum", "Atocion armeria", NA, NA,
+                     "Vaccinium corymbosum", NA, NA, "Festuca myuros")
+other$new_name[is.na(other$new_name)] <- other$GBIF[is.na(other$new_name)]
+
+# Assign
+syn$GBIF_subspecies[syn$GBIF %in% other$old] <- other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)]
+syn$GBIF_species[syn$GBIF %in% other$old] <- paste(vegdata::parse.taxa(other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]],
+                                                       vegdata::parse.taxa(other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[3]])
+syn$GBIF_genus[syn$GBIF %in% other$old] <- (vegdata::parse.taxa(other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]])
+syn$GBIF[syn$GBIF %in% other$old] <- syn$GBIF_subspecies[syn$GBIF %in% other$old]
+syn$GBIF_subspecies[syn$GBIF_subspecies == syn$GBIF_species ] <- NA
+syn$GBIF_rank[!is.na(syn$GBIF_subspecies)] <- "SUBSPECIES"
+syn$GBIF_accepted[syn$Name %in% other$old] <- NA
+syn$GBIF_ID[syn$Name %in% other$old] <- NA
+syn$validated[syn$Name %in% other$old] <- T
+
+
+########
+# Some (13) remain
+syn_empty <- syn[is.na(syn$GBIF_species),]
+# Change
+other <- data.frame(old = syn_empty$Name, GBIF = syn_empty$GBIF)
+
+# Add
+other$new_name <- c(NA, NA, "Crataegus coccinea", "Epimedium grandiflorum", NA, NA, NA, NA, "Rosa canina biserrata", NA, NA, NA, NA)
+other$new_name[is.na(other$new_name)] <- other$GBIF[is.na(other$new_name)]
+
+# Assign
+syn$GBIF_species[syn$Name %in% other$old] <- other$new_name[match(syn$Name[syn$Name %in% other$old], other$old)]
+syn$GBIF_genus[syn$Name %in% other$old] <- (vegdata::parse.taxa(other$new_name[match(syn$Name[syn$Name %in% other$old], other$old)])[[2]])
+syn$GBIF[syn$Name %in% other$old] <- syn$GBIF_species[syn$Name %in% other$old]
+syn$GBIF_rank[is.na(syn$GBIF_subspecies)] <- "SPECIES"
+syn$GBIF_accepted[syn$Name %in% other$old] <- NA
+syn$GBIF_ID[syn$Name %in% other$old] <- NA
+syn$validated[syn$Name %in% other$old] <- T
+
+
+# Check previously noticed errors
+check <- syn[syn$GBIF %in%  c("Centaurea triumfettii semidecurrens", "Crataegus coccinea","Abelia grandiflora", 
+                              "Pardoglossum cheirifolium cheirifolium", "Xanthoselinum alsaticum alsaticum", "Sedum candolleanum"),]
+
+
+# Assign
+syn$GBIF_ID <- as.integer(as.character(syn$GBIF_ID))
+names_plantnet[names_plantnet$GBIF_Status == "SYNONYM" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),] <- syn
+sum(is.na(names_plantnet$validated))
+# 401 remain
+```
+
+
+### Doubtful
+```{r}
+# Check remaining status classes
+doubt <- names_plantnet[names_plantnet$GBIF_Status == "DOUBTFUL" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),]
+
+# check whether none are subspecies
+gbif <-  name_backbone_checklist(doubt$Name[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(doubt$Name)/2*(i-1))
+  end <- floor(length(doubt$GBIF)/2 * i)
+  # run 
+  data <- name_backbone_checklist(doubt$Name[begin: end])
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+gbif_four <- gbif
+
+# Assign subspecies
+gbif$final <- gbif$subspecies
+
+
+# Assign scientific name
+gbif$scientificName[!is.na(gbif$acceptedScientificName)] <- gbif$acceptedScientificName[!is.na(gbif$acceptedScientificName)]
+gbif$usageKey[!is.na(gbif$acceptedUsageKey)] <- gbif$acceptedUsageKey[!is.na(gbif$acceptedUsageKey)]
+
+
+# Assign
+gbif_doubt <- gbif[!is.na(gbif$status) & gbif$matchType %in% "EXACT",]
+doubt[, 10:18] <- NA
+# Subspecies
+doubt$GBIF_subspecies <- gbif_doubt$final[match(doubt$Name, gbif_doubt$verbatim_name)]
+doubt$GBIF_rank[!is.na(doubt$GBIF_subspecies)] <- "SUBSPECIES"
+doubt$GBIF[!is.na(doubt$GBIF_subspecies)] <- doubt$GBIF_subspecies[!is.na(doubt$GBIF_subspecies)] 
+doubt$GBIF_ID[!is.na(doubt$GBIF_subspecies)] <- gbif_doubt$usageKey[match(doubt$Name[!is.na(doubt$GBIF_subspecies)], gbif_doubt$verbatim_name)]
+doubt$GBIF_accepted[!is.na(doubt$GBIF_subspecies)] <- gbif_doubt$scientificName[match(doubt$Name[!is.na(doubt$GBIF_subspecies)], gbif_doubt$verbatim_name)]
+doubt$validated[!is.na(doubt$GBIF_subspecies)] <- T
+
+# Species
+doubt$GBIF_species <- gbif_doubt$species[match(doubt$Name, gbif_doubt$verbatim_name)]
+doubt$GBIF_genus<- gbif_doubt$genus[match(doubt$Name, gbif_doubt$verbatim_name)]
+doubt$GBIF_family <- gbif_doubt$family[match(doubt$Name, gbif_doubt$verbatim_name)]
+doubt$GBIF_rank[doubt$Name %in% gbif_doubt$verbatim_name & is.na(doubt$GBIF_subspecies)] <- "SPECIES"
+doubt$GBIF[doubt$Name %in% gbif_doubt$verbatim_name & is.na(doubt$GBIF_subspecies)]  <-  
+  gbif_doubt$species[match(doubt$Name[doubt$Name %in% gbif_doubt$verbatim_name & is.na(doubt$GBIF_subspecies)]  , gbif_doubt$verbatim_name)]
+doubt$GBIF_ID[doubt$Name %in% gbif_doubt$verbatim_name & is.na(doubt$GBIF_subspecies)]  <-  
+  gbif_doubt$usageKey[match(doubt$Name[doubt$Name %in% gbif_doubt$verbatim_name & is.na(doubt$GBIF_subspecies)]  , gbif_doubt$verbatim_name)]
+doubt$GBIF_accepted[doubt$Name %in% gbif_doubt$verbatim_name & is.na(doubt$GBIF_subspecies)]  <-  
+  gbif_doubt$scientificName[match(doubt$Name[doubt$Name %in% gbif_doubt$verbatim_name & is.na(doubt$GBIF_subspecies)]  , gbif_doubt$verbatim_name)]
+doubt$validated[doubt$Name %in% gbif_doubt$verbatim_name & is.na(doubt$GBIF_subspecies)] <- T
+
+
+#######
+# Some remain
+doubt_empty <- doubt[is.na(doubt$GBIF_species),]
+# Change
+other <- data.frame(old = doubt_empty$Name, GBIF = doubt_empty$GBIF)
+
+# Add
+other$new_name <- c("Crepis blattarioides")
+
+# Assign
+doubt$GBIF_species[doubt$Name %in% other$old] <- other$new_name[match(doubt$Name[doubt$Name %in% other$old], other$old)]
+doubt$GBIF_genus[doubt$Name %in% other$old] <- "Crepis"
+doubt$GBIF[doubt$Name %in% other$old] <- doubt$GBIF_species[doubt$Name %in% other$old]
+doubt$GBIF_rank[is.na(doubt$GBIF_subspecies)] <- "SPECIES"
+doubt$GBIF_accepted[doubt$Name %in% other$old] <- NA
+doubt$GBIF_ID[doubt$Name %in% other$old] <- NA
+doubt$validated[doubt$Name %in% other$old] <- T
+
+
+# Assign
+doubt$GBIF_ID <- as.integer(as.character(doubt$GBIF_ID))
+names_plantnet[names_plantnet$GBIF_Status == "DOUBTFUL" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),] <- doubt
+sum(is.na(names_plantnet$validated))
+# 233 remain
+```
+
+
+### Heterotypic synonym
+```{r}
+# Check remaining status classes
+syn <- names_plantnet[names_plantnet$GBIF_Status %in% "HETEROTYPIC_SYNONYM" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),]
+# Check whether none are subspecies
+gbif <-  name_backbone_checklist(syn$Name[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(syn$Name)/2*(i-1))
+  end <- floor(length(syn$GBIF)/2 * i)
+  # run 
+  data <- name_backbone_checklist(syn$Name[begin: end])
+  gbif <- bind_rows(gbif, data)
+}
+# Save
+gbif <- gbif[-1,]
+gbif_five <- gbif
+
+# Get final names
+gbif$final <- gbif$subspecies
+
+# Assign scientific name
+gbif$scientificName[!is.na(gbif$acceptedScientificName)] <- gbif$acceptedScientificName[!is.na(gbif$acceptedScientificName)]
+gbif$usageKey[!is.na(gbif$acceptedUsageKey)] <- gbif$acceptedUsageKey[!is.na(gbif$acceptedUsageKey)]
+
+
+######
+# Assign
+gbif_syn <- gbif[!is.na(gbif$status) & gbif$matchType %in% "EXACT",]
+syn[, 10:18] <- NA
+# Subspecies
+syn$GBIF_subspecies <- gbif_syn$final[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_rank[!is.na(syn$GBIF_subspecies)] <- "SUBSPECIES"
+syn$GBIF[!is.na(syn$GBIF_subspecies)] <- syn$GBIF_subspecies[!is.na(syn$GBIF_subspecies)] 
+syn$GBIF_ID[!is.na(syn$GBIF_subspecies)] <- gbif_syn$usageKey[match(syn$Name[!is.na(syn$GBIF_subspecies)], gbif_syn$verbatim_name)]
+syn$GBIF_accepted[!is.na(syn$GBIF_subspecies)] <- gbif_syn$scientificName[match(syn$Name[!is.na(syn$GBIF_subspecies)], gbif_syn$verbatim_name)]
+syn$validated[!is.na(syn$GBIF_subspecies)] <- T
+
+# Species
+syn$GBIF_species <- gbif_syn$species[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_genus<- gbif_syn$genus[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_family <- gbif_syn$family[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_rank[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)] <- "SPECIES"
+syn$GBIF[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$species[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$GBIF_ID[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$usageKey[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$GBIF_accepted[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$scientificName[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$validated[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)] <- T
+
+
+# Change some errors
+other <- data.frame(old = c("Crepis conyzifolia", "Inula britannica", "Inula montana", "Inula salicina", "Orobanche ramosa", "Potentilla incana",
+                   "Scorzonera austriaca", "Senecio jacobaea"),
+           new_name = c("Crepis blattarioides", "Pentanema britannicum", "Pentanema montanum", "Pentanema salicinum", "Phelipanche ramosa", "Potentilla verna", 
+                   "Takhtajaniantha austriaca", "Jacobaea vulgaris"))
+
+# Assign
+syn$GBIF_subspecies[syn$GBIF %in% other$old] <- other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)]
+syn$GBIF_species[syn$GBIF %in% other$old] <- paste(vegdata::parse.taxa(other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]],
+                                                       vegdata::parse.taxa(other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[3]])
+syn$GBIF_genus[syn$GBIF %in% other$old] <- (vegdata::parse.taxa(other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]])
+syn$GBIF[syn$GBIF %in% other$old] <- syn$GBIF_subspecies[syn$GBIF %in% other$old]
+syn$GBIF_subspecies[syn$GBIF_subspecies == syn$GBIF_species ] <- NA
+syn$GBIF_rank[!is.na(syn$GBIF_subspecies)] <- "SUBSPECIES"
+syn$GBIF_accepted[syn$Name %in% other$old] <- NA
+syn$GBIF_ID[syn$Name %in% other$old] <- NA
+syn$validated[syn$Name %in% other$old] <- T
+
+# How many not ready yet (67)
+sum(is.na(syn$GBIF_genus))
+
+
+
+#######
+# Some are already saved previously
+saved <- names_plantnet[!is.na(names_plantnet$validated),]
+saved <- saved[saved$Name %in% syn$Name,]
+# Assign
+syn$GBIF_species[syn$Name %in% saved$Name] <- saved$GBIF_species[match(syn$Name[syn$Name %in% saved$Name], saved$Name)]
+syn$GBIF_genus[syn$Name %in% saved$Name] <- saved$GBIF_genus[match(syn$Name[syn$Name %in% saved$Name], saved$Name)]
+syn$GBIF_family[syn$Name %in% saved$Name] <- saved$GBIF_family[match(syn$Name[syn$Name %in% saved$Name], saved$Name)]
+syn$GBIF_accepted[syn$Name %in% saved$Name] <- saved$GBIF_accepted[match(syn$Name[syn$Name %in% saved$Name], saved$Name)]
+syn$GBIF_ID[syn$Name %in% saved$Name] <- saved$GBIF_ID[match(syn$Name[syn$Name %in% saved$Name], saved$Name)]
+syn$validated[syn$Name %in% saved$Name] <- saved$validated[match(syn$Name[syn$Name %in% saved$Name], saved$Name)]
+syn$GBIF_rank[syn$Name %in% saved$Name] <- saved$GBIF_rank[match(syn$Name[syn$Name %in% saved$Name], saved$Name)]
+
+# How many not ready yet (66)
+sum(is.na(syn$GBIF_genus))
+
+
+
+########
+# Remaining have to be checked
+syn_missing <- syn[is.na(syn$validated),]
+gbif_incorrect <- gbif[gbif$verbatim_name %in% syn_missing$Name,]
+
+# We will verify manually (66)
+change <- data.frame(old= syn_missing$GBIF, new= syn_missing$GBIF_species)
+change$new <- names_plantnet$GBIF_species[match(change$old, names_plantnet$Name)]
+
+# Some have to be changed or kept
+keep <- change[c(1,2, 3, 4, 9, 19, 25, 27, 29, 31, 33, 36, 53, 65),]
+other <- change[c(5, 7, 10, 13, 16, 18, 22, 37, 38, 45, 46, 47, 49,51, 58, 64),]
+change <- change[c(6, 8, 11, 12, 14, 15, 17, 20, 21, 23, 24, 26, 28, 
+                   30, 32, 34, 35, 39, 40, 41, 42, 43, 44, 48, 50,
+                   52, 54, 55, 56, 57, 59, 60, 61, 62, 63, 66), ]
+
+# Update the other
+other$final <- c("Pulsatilla halleri halleri", "Apocynum cannabinum", "Asplenium laciniatum laciniatum", "Mahonia aquifolium",
+                 "Centaurea stoebe stoebe", "Polanisia dodecandra dodecandra", "Chamaenerion angustifolium angustifolium", "Orobanche camptolepis", 
+                 "Phelipanche purpurea purpurea", "Prunus domestica insititia", "Myosurus minimus minimus", "Ranunculus polyanthemos nemorosus", "Atadinus pumilus pumilus",
+                 "Caroxylon vermiculatum", "Aria latifolia", "Valerianella locusta locusta")
+syn$GBIF_subspecies[syn$GBIF %in% other$old] <- other$final[match(syn$GBIF[syn$GBIF %in% other$old], other$old)]
+syn$GBIF_species[syn$GBIF %in% other$old] <- paste(vegdata::parse.taxa(other$final[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]],
+                                                       vegdata::parse.taxa(other$final[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[3]])
+syn$GBIF_genus[syn$GBIF %in% other$old] <- (vegdata::parse.taxa(other$final[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]])
+syn$GBIF[syn$GBIF %in% other$old] <- syn$GBIF_subspecies[syn$GBIF %in% other$old]
+syn$GBIF_subspecies[syn$GBIF_subspecies == syn$GBIF_species] <- NA
+syn$GBIF_rank[!is.na(syn$GBIF_subspecies)] <- "SUBSPECIES"
+syn$GBIF_rank[is.na(syn$GBIF_subspecies) & syn$Name %in% other$old] <- "SPECIES"
+syn$GBIF_accepted[syn$GBIF %in% other$final] <- NA
+syn$GBIF_ID[syn$GBIF %in% other$final] <- NA
+syn$validated[syn$GBIF %in% other$final] <- T
+
+# Change the ones found
+syn$GBIF_species[syn$GBIF %in% change$old] <- change$new[match(syn$GBIF[syn$GBIF %in% change$old], change$old)]
+syn$GBIF_genus[syn$GBIF %in% change$old] <- (vegdata::parse.taxa(change$new[match(syn$GBIF[syn$GBIF %in% change$old], change$old)])[[2]])
+syn$GBIF_rank[syn$GBIF %in% change$old] <- "SPECIES"
+syn$GBIF[syn$GBIF %in% change$old] <- change$new[match(syn$GBIF[syn$GBIF %in% change$old], change$old)]
+syn$GBIF_accepted[syn$Name %in% change$old] <- NA
+syn$GBIF_ID[syn$Name %in% change$old] <- NA
+syn$validated[syn$Name %in% change$old] <- T
+
+
+# Change the ones correct
+syn$GBIF_species[syn$GBIF %in% keep$old] <- keep$old[match(syn$GBIF[syn$GBIF %in% keep$old], keep$old)]
+syn$GBIF_genus[syn$GBIF %in% keep$old] <- (vegdata::parse.taxa(keep$old[match(syn$GBIF[syn$GBIF %in% keep$old], keep$old)])[[2]])
+syn$GBIF_rank[syn$GBIF %in% keep$old] <- "SPECIES"
+syn$GBIF[syn$GBIF %in% keep$old] <- keep$old[match(syn$GBIF[syn$GBIF %in% keep$old], keep$old)]
+syn$GBIF_accepted[syn$GBIF %in% keep$old] <- NA
+syn$GBIF_ID[syn$GBIF %in% keep$old] <- NA
+syn$validated[syn$GBIF %in% keep$old] <- T
+
+# How many remain
+sum(is.na(syn$validated))
+
+
+# Assign
+syn$GBIF_ID <- as.integer(as.character(syn$GBIF_ID))
+names_plantnet[names_plantnet$GBIF_Status %in% "HETEROTYPIC_SYNONYM" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),] <- syn
+sum(is.na(names_plantnet$validated))
+# 116
+```
+
+
+### Homotypic synonym
+```{r}
+# Check remaining status classes
+syn <- names_plantnet[names_plantnet$GBIF_Status == "HOMOTYPIC_SYNONYM" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),]
+
+# check whether none are subspecies
+gbif <-  name_backbone_checklist(syn$Name[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(syn$Name)/2*(i-1))
+  end <- floor(length(syn$Name)/2 * i)
+  # run 
+  data <- name_backbone_checklist(syn$Name[begin: end])
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+gbif_six <- gbif
+
+
+# Get final names
+gbif$final <- gbif$subspecies
+
+# Assign scientific name
+gbif$scientificName[!is.na(gbif$acceptedScientificName)] <- gbif$acceptedScientificName[!is.na(gbif$acceptedScientificName)]
+gbif$usageKey[!is.na(gbif$acceptedUsageKey)] <- gbif$acceptedUsageKey[!is.na(gbif$acceptedUsageKey)]
+
+
+######
+# Assign
+gbif_syn <- gbif[!is.na(gbif$status) & gbif$matchType %in% "EXACT",]
+syn[, 10:18] <- NA
+# Subspecies
+syn$GBIF_subspecies <- gbif_syn$final[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_rank[!is.na(syn$GBIF_subspecies)] <- "SUBSPECIES"
+syn$GBIF[!is.na(syn$GBIF_subspecies)] <- syn$GBIF_subspecies[!is.na(syn$GBIF_subspecies)] 
+syn$GBIF_ID[!is.na(syn$GBIF_subspecies)] <- gbif_syn$usageKey[match(syn$Name[!is.na(syn$GBIF_subspecies)], gbif_syn$verbatim_name)]
+syn$GBIF_accepted[!is.na(syn$GBIF_subspecies)] <- gbif_syn$scientificName[match(syn$Name[!is.na(syn$GBIF_subspecies)], gbif_syn$verbatim_name)]
+syn$validated[!is.na(syn$GBIF_subspecies)] <- T
+
+# Species
+syn$GBIF_species <- gbif_syn$species[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_genus<- gbif_syn$genus[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_family <- gbif_syn$family[match(syn$Name, gbif_syn$verbatim_name)]
+syn$GBIF_rank[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)] <- "SPECIES"
+syn$GBIF[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$species[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$GBIF_ID[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$usageKey[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$GBIF_accepted[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  <-  
+  gbif_syn$scientificName[match(syn$Name[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)]  , gbif_syn$verbatim_name)]
+syn$validated[syn$Name %in% gbif_syn$verbatim_name & is.na(syn$GBIF_subspecies)] <- T
+
+
+# Change some errors
+other <- data.frame(old = c("Senega cyparissias", "Microseris alpestris", "Merremia umbellata", "Leontodon rothii", "Coincya tournefortii", "Hieracium intybaceum"),
+                    new_name = c("Senega cyparissias", "Nothocalais alpestris", "Camonea pilosa", "Leontodon longirostris", "Coincya tournefortii", "Crepis blattarioides"))
+
+# Assign
+syn$GBIF_species[syn$Name %in% other$old] <- other$new_name[match(syn$Name[syn$Name %in% other$old], other$old)]
+syn$GBIF_genus[syn$Name %in% other$old] <- (vegdata::parse.taxa(other$new_name[match(syn$GBIF[syn$GBIF %in% other$old], other$old)])[[2]])
+syn$GBIF[syn$Name %in% other$old] <- syn$GBIF_species[syn$Name %in% other$old]
+syn$GBIF_rank[is.na(syn$GBIF_subspecies)] <- "SPECIES"
+syn$GBIF_accepted[syn$Name %in% other$old] <- NA
+syn$GBIF_ID[syn$Name %in% other$old] <- NA
+syn$validated[syn$Name %in% other$old] <- T
+
+# How many not ready yet
+sum(is.na(syn$GBIF_genus))
+
+
+
+# Assign
+syn$GBIF_subspecies[syn$Name %in% c("Osmunda claytoniana")] <- "Claytosmunda claytoniana claytoniana"
+syn$GBIF_species[syn$Name %in% c("Osmunda claytoniana")] <- "Claytosmunda claytoniana"
+syn$GBIF[syn$Name %in% c("Osmunda claytoniana")] <- "Claytosmunda claytoniana claytoniana"
+syn$GBIF_genus[syn$Name %in% c("Osmunda claytoniana")] <- "Claytosmunda"
+syn$GBIF_accepted[syn$Name %in% c("Osmunda claytoniana")] <- NA
+syn$GBIF_ID[syn$Name %in% c("Osmunda claytoniana")] <- NA
+
+
+# Assign
+syn$GBIF_ID <- as.integer(as.character(syn$GBIF_ID))
+names_plantnet[names_plantnet$GBIF_Status == "HOMOTYPIC_SYNONYM" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),] <- syn
+sum(is.na(names_plantnet$validated))
+# 92 remain
+```
+
+
+### Proparte synonym
+```{r}
+# Which remain
+remaining <- names_plantnet[is.na(names_plantnet$validated),]
+
+
+#######
+# Check Proparte synonyms
+check <- names_plantnet[names_plantnet$GBIF_Status == "PROPARTE_SYNONYM" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),]
+
+# Most are accepted, except these two
+change <- data.frame(new = c("Rhinanthus serotinus serotinus", "Sagina alexandrae", "Rosa pendulina", "Rhinanthus glacialis", "Luffa aegyptiaca"), 
+                     old = c("Rhinanthus major","Sagina subulata", "Rosa cinnamomea", "Rhinanthus angustifolius", "Luffa cylindrica"))
+
+# Change these
+check$GBIF_subspecies[check$Name %in% change$old] <- change$new[match(check$Name[check$Name %in% change$old], change$old)]
+check$GBIF_species[check$Name %in% change$old] <- paste(vegdata::parse.taxa(check$GBIF_subspecies[!is.na(check$GBIF_subspecies)])[[2]],
+                                                        vegdata::parse.taxa(check$GBIF_subspecies[!is.na(check$GBIF_subspecies)])[[3]])
+check$GBIF[check$Name %in% change$old] <- change$new[match(check$Name[check$Name %in% change$old], change$old)]
+check$GBIF_subspecies[check$GBIF_subspecies == check$GBIF_species] <- NA
+check$GBIF_ID[check$Name %in% change$old] <- NA
+check$GBIF_accepted[check$Name %in% change$old] <- NA
+
+# Change the others
+check$GBIF[!check$Name %in% change$old] <- check$GBIF_species[!check$Name %in% change$old] 
+check$GBIF_genus <- vegdata::parse.taxa(check$GBIF_species)[[2]]
+check$validated <- T
+
+# Assign
+names_plantnet[names_plantnet$GBIF_Status == "PROPARTE_SYNONYM" & !is.na(names_plantnet$GBIF) & is.na(names_plantnet$validated),] <- check 
+# How many remain --> 84 still
+sum(is.na(names_plantnet$validated))
+```
+
+
+### Remaining
+```{r}
+# Get all the last ones
+remaining <- names_plantnet[is.na(names_plantnet$validated),]
+# These are all missing a GBIF ID number, run again through GBIF
+
+# Many are genera with spp. as an indicator
+# Remove spp. and check again against gbif
+remaining$new_name <- gsub(" spp.","", remaining$Name)
+gbif <-  name_backbone_checklist(remaining$new_name[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(remaining$new_name)/2*(i-1))
+  end <- floor(length(remaining$new_name)/2 * i)
+  # run 
+  data <- name_backbone_checklist(remaining$new_name[begin: end])
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+gbif_seven <- gbif
+
+
+# Get final names
+gbif$final <- gbif$subspecies
+
+# Assign scientific name
+gbif$scientificName[!is.na(gbif$acceptedScientificName)] <- gbif$acceptedScientificName[!is.na(gbif$acceptedScientificName)]
+gbif$usageKey[!is.na(gbif$acceptedUsageKey)] <- gbif$acceptedUsageKey[!is.na(gbif$acceptedUsageKey)]
+
+
+######
+# Assign
+gbif_acc <- gbif[!is.na(gbif$status) & gbif$matchType %in% "EXACT",]
+remaining[, 10:18] <- NA
+# Subspecies
+remaining$GBIF_subspecies <- gbif_acc$final[match(remaining$new_name, gbif_acc$verbatim_name)]
+remaining$GBIF_rank[!is.na(remaining$GBIF_subspecies)] <- "SUBSPECIES"
+remaining$GBIF[!is.na(remaining$GBIF_subspecies)] <- remaining$GBIF_subspecies[!is.na(remaining$GBIF_subspecies)] 
+remaining$GBIF_ID[!is.na(remaining$GBIF_subspecies)] <- gbif_acc$usageKey[match(remaining$new_name[!is.na(remaining$GBIF_subspecies)], gbif_acc$verbatim_name)]
+remaining$GBIF_accepted[!is.na(remaining$GBIF_subspecies)] <- gbif_acc$scientificName[match(remaining$new_name[!is.na(remaining$GBIF_subspecies)], gbif_acc$verbatim_name)]
+remaining$validated[!is.na(remaining$GBIF_subspecies)] <- T
+
+# Species
+remaining$GBIF_species <- gbif_acc$species[match(remaining$new_name, gbif_acc$verbatim_name)]
+remaining$GBIF_genus<- gbif_acc$genus[match(remaining$new_name, gbif_acc$verbatim_name)]
+remaining$GBIF_family <- gbif_acc$family[match(remaining$new_name, gbif_acc$verbatim_name)]
+remaining$GBIF_rank[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_subspecies)] <- "SPECIES"
+remaining$GBIF_rank[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_species)] <- "GENUS"
+remaining$GBIF[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_subspecies)]  <-  
+  gbif_acc$species[match(remaining$new_name[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_subspecies)]  , gbif_acc$verbatim_name)]
+remaining$GBIF[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_species)]  <-  
+  gbif_acc$genus[match(remaining$new_name[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_species)]  , gbif_acc$verbatim_name)]
+remaining$GBIF_ID[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_subspecies)]  <-  
+  gbif_acc$usageKey[match(remaining$new_name[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_subspecies)]  , gbif_acc$verbatim_name)]
+remaining$GBIF_accepted[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_subspecies)]  <-  
+  gbif_syn$scientificName[match(remaining$new_name[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_subspecies)]  , gbif_acc$verbatim_name)]
+remaining$validated[remaining$new_name %in% gbif_acc$verbatim_name & is.na(remaining$GBIF_subspecies)] <- T
+
+# How many remain
+sum(is.na(remaining$GBIF))
+
+
+# Assign the rest
+remaining$GBIF_ID <- as.integer(as.character(remaining$GBIF_ID))
+names_plantnet[is.na(names_plantnet$validated),] <- remaining[, 1:18]
+```
+
+
+```{r}
+# Get all the last ones
+remaining <- names_plantnet[is.na(names_plantnet$validated),]
+remaining$old <- gsub(" spp.","", remaining$Name)
+
+# Some have to be adapted
+change <- remaining[c(3, 9, 15, 16, 17, 20, 21, 30, 32, 36, 37),]
+change$new <- c("Begonia cucullata","Fragaria", "Anacis major", "Anacis tripteris", "Anacis verticillata", "Rhamphospermum arvense", 
+                "Rhamphospermum carinatum", "Podophyllum", "Psidium cattleianum","Dracaena" ,"Taraxacum")
+
+# Change the ones found
+remaining$GBIF_species[remaining$old %in% change$old] <- change$new[match(remaining$old[remaining$old %in% change$old], change$old)]
+remaining$GBIF_species[is.na(remaining$GBIF_species)] <- remaining$old[is.na(remaining$GBIF_species)] 
+remaining$GBIF_genus <- (vegdata::parse.taxa(remaining$GBIF_species)[[2]])
+remaining$GBIF <- remaining$GBIF_species
+remaining$GBIF_species[remaining$GBIF_species == remaining$GBIF_genus] <- NA
+remaining$GBIF_rank[!is.na(remaining$GBIF_species)] <- "SPECIES"
+remaining$GBIF_rank[is.na(remaining$GBIF_species)] <- "GENUS"
+remaining$validated <- T
+
+# Assign
+names_plantnet[is.na(names_plantnet$validated),] <- remaining[, c(1:18)]
+
+# Some genera are previously not assigned, now do it
+# names_plantnet$GBIF_genus[is.na(names_plantnet$GBIF_genus)] <- vegdata::parse.taxa(names_plantnet$GBIF_species[is.na(names_plantnet$GBIF_genus)])[[2]]
+names_plantnet$GBIF_accepted[names_plantnet$GBIF_rank %in% "GENUS"] <- NA
+names_plantnet$GBIF_rank[!is.na(names_plantnet$GBIF_subspecies)] <- "SUBSPECIES"
+```
+
+
+### Families
+```{r}
+# Get dataframe of genera 
+genera <- names_plantnet |> group_by(GBIF_genus, GBIF_family) |> summarise(n = n())
+genera <- genera[!is.na(genera$GBIF_family),1:2]
+dup <- genera[duplicated(genera$GBIF_genus) | duplicated(genera$GBIF_genus, fromLast = T),]
+dup <- dup[c(2,3, 6),]
+# Change these
+names_plantnet$GBIF_family[names_plantnet$GBIF_genus %in% dup$GBIF_genus] <- 
+  dup$GBIF_family[match(names_plantnet$GBIF_genus[names_plantnet$GBIF_genus %in% dup$GBIF_genus], dup$GBIF_genus)]
+# Get again
+genera <- names_plantnet |> group_by(GBIF_genus, GBIF_family) |> summarise(n = n())
+genera <- genera[!is.na(genera$GBIF_family),1:2]
+
+# Missing families
+fam_mis <- names_plantnet[is.na(names_plantnet$GBIF_family),]
+fam_mis$GBIF_family <- genera$GBIF_family[match(fam_mis$GBIF_genus, genera$GBIF_genus)]
+fam_mis$GBIF_family[is.na(fam_mis$GBIF_family)] <- fam_mis$Family[is.na(fam_mis$GBIF_family)]
+# Assign
+names_plantnet[is.na(names_plantnet$GBIF_family),] <- fam_mis
+```
+
+
+### GBIF_ID
+```{r}
+########
+# We will look whether we can assign new ID's or accepted names (232)
+non_acc <- names_plantnet[is.na(names_plantnet$GBIF_accepted),]
+# Look for accepted names
+acc <-  names_plantnet[!is.na(names_plantnet$GBIF_accepted),]
+
+# Assign
+non_acc$GBIF_accepted <- acc$GBIF_accepted[match(non_acc$GBIF, acc$GBIF)]
+non_acc$GBIF_ID <- acc$GBIF_ID[match(non_acc$GBIF, acc$GBIF)]
+
+
+# Assign also keys for genera etc
+genera <- names_plantnet[names_plantnet$GBIF_rank %in% "GENUS",]
+gbif <-  name_backbone_checklist(genera$GBIF[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(genera$GBIF)/2*(i-1))
+  end <- floor(length(genera$GBIF)/2 * i)
+  # run 
+  data <- name_backbone_checklist(genera$GBIF[begin: end])
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+gbif_eight <- gbif
+
+# assign these keys
+non_acc$GBIF_ID[is.na(non_acc$GBIF_ID)]  <- gbif$genusKey[match(non_acc$GBIF[is.na(non_acc$GBIF_ID)], gbif$verbatim_name)]
+non_acc$GBIF_accepted[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)]  <- 
+  gbif$scientificName[match(non_acc$GBIF[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)], gbif$verbatim_name)]
+
+# Assign
+non_acc$GBIF_ID <- as.integer(as.character(non_acc$GBIF_ID))
+names_plantnet[is.na(names_plantnet$GBIF_accepted),] <- non_acc
+
+
+######
+# Get the remaining GBIF ID's (125)
+non_acc <- names_plantnet[is.na(names_plantnet$GBIF_ID) & !duplicated(names_plantnet$GBIF) ,]
+
+# Create a list
+gbif_list <- vector("list", nrow(non_acc))
+
+# Run function to get ID's
+for(i in 1:nrow(non_acc)){
+  res <- tryCatch(get_gbifid_(non_acc$GBIF[i])[[1]], error = function(e) NULL)
+  if(is.null(res) || nrow(res) == 0) {
+    gbif_list[[i]] <- data.frame(query = non_acc$GBIF[i], usagekey = NA, status = NA)
+  } else {
+    res$query <- non_acc$GBIF[i]   # keep track of which input name this came from
+    gbif_list[[i]] <- res
+  }
+}
+
+# Combine all data
+gbif_candidates <- bind_rows(gbif_list)
+
+# Look at the data that is supposed to be exactly the same
+gbif_candidates <- gbif_candidates[gbif_candidates$matchtype %in% "EXACT",]
+# Remove the duplicated ones
+dup <- gbif_candidates[duplicated(gbif_candidates$query),]
+already_fine <- gbif_candidates[!gbif_candidates$query %in% dup$query,]
+
+# These can already be assigned
+non_acc$GBIF_ID[is.na(non_acc$GBIF_ID)]  <- already_fine$usagekey[match(non_acc$GBIF[is.na(non_acc$GBIF_ID)], already_fine$query)]
+non_acc$GBIF_accepted[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)]  <- 
+  already_fine$scientificname[match(non_acc$GBIF[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)], already_fine$query)]
+
+# Look at remaining
+gbif_candidates <- gbif_candidates[!gbif_candidates$query %in% already_fine$query,]
+# Look at accepted
+gbif_candidates <- gbif_candidates[gbif_candidates$status %in% "ACCEPTED",]
+dup <- gbif_candidates[duplicated(gbif_candidates$query),]
+already_fine <- gbif_candidates[!gbif_candidates$query %in% dup$query,]
+# These can already be assigned
+non_acc$GBIF_ID[is.na(non_acc$GBIF_ID)]  <- already_fine$usagekey[match(non_acc$GBIF[is.na(non_acc$GBIF_ID)], already_fine$query)]
+non_acc$GBIF_accepted[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)]  <- 
+  already_fine$scientificname[match(non_acc$GBIF[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)], already_fine$query)]
+
+# Look at remaining
+gbif_candidates <- gbif_candidates[!gbif_candidates$query %in% already_fine$query,]
+choice <- c("Betonica officinalis subsp. officinalis","Cymbidium Sw.","Dahlia Cav.", "Dracaena Vand. ex L.", "Echinopsis Zucc.", "Ficaria verna subsp. verna", "Ficus L.",
+            "Pulicaria arabica subsp. hispanica (Boiss.) Murb.","Rhinanthus serotinus subsp. serotinus", "Salix L.", "Taraxacum Weber", "Viola L.")
+already_fine <- gbif_candidates[gbif_candidates$scientificname %in% choice,]
+# These can already be assigned
+non_acc$GBIF_ID[is.na(non_acc$GBIF_ID)]  <- already_fine$usagekey[match(non_acc$GBIF[is.na(non_acc$GBIF_ID)], already_fine$query)]
+non_acc$GBIF_accepted[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)]  <- 
+  already_fine$scientificname[match(non_acc$GBIF[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)], already_fine$query)]
+
+
+
+# Combine all data again
+gbif_candidates <- bind_rows(gbif_list)
+gbif_candidates <- gbif_candidates[!gbif_candidates$query %in% non_acc$GBIF[!is.na(non_acc$GBIF_ID)],]
+gbif_candidates <- gbif_candidates[gbif_candidates$matchtype %in% "EXACT",]
+
+# We will just also choose from these
+choice <- c("Alchemilla arvensis L.", "Allium cirrhosum Vand.", "Allium porrum L.", "Alopecurus gerardii (All.) Vill.", "Amelanchier spicata (Lam.) K.Koch", 
+            "Asarum virginicum L.", "Convolvulus soldanella L.", "Cynoglossum lanceolatum Forssk.", "Draba muralis L.", "Eruca vesicaria subsp. sativa (Mill.) Thell.", 
+            "Erysimum ochroleucum (Schleich.) DC.", "Festuca arundinacea Schreb.", "Galium corrudifolium Vill.", "Genista aetnensis (Biv.) DC.", 
+            "Hieracium megalocephalon Nash", "Hydrangea × versicolor (Fortune) J.M.H.Shaw", "Hypochaeris uniflora Vill.", "Iris latifolia (Mill.) Voss", 
+            "Justicia procumbens L.", "Leontodon saxatilis Lam.", "Melaleuca citrina (Curtis) Dum.Cours.", "Rhamphospermum arvense (L.) Andrz. ex Besser", 
+            "Phoebanthus grandiflora (Torr. & A.Gray) S.F.Blake", "Rhaponticum centauroides (L.) O.Bolòs", "Sanguisorba verrucosa (G.Don) Ces.", 
+            "Schedonorus arundinaceus (Schreb.) Dumort.", "Sorbus aria (L.) Crantz", "Aria latifolia (Lam.) M.Roem.","Vicia angustifolia L.")
+
+# Assign
+already_fine <- gbif_candidates[gbif_candidates$scientificname %in% choice,]
+# These can already be assigned
+non_acc$GBIF_ID[is.na(non_acc$GBIF_ID)]  <- already_fine$usagekey[match(non_acc$GBIF[is.na(non_acc$GBIF_ID)], already_fine$query)]
+non_acc$GBIF_accepted[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)]  <- 
+  already_fine$scientificname[match(non_acc$GBIF[is.na(non_acc$GBIF_accepted) & !is.na(non_acc$GBIF_ID)], already_fine$query)]
+
+
+# Assign also keys for genera etc
+non_acc_assign <- names_plantnet[is.na(names_plantnet$GBIF_ID) ,]
+non_acc_assign$GBIF_accepted <- non_acc$GBIF_accepted[match(non_acc_assign$GBIF, non_acc$GBIF)]
+non_acc_assign$GBIF_ID <- non_acc$GBIF_ID[match(non_acc_assign$GBIF, non_acc$GBIF)]
+
+# Assign
+non_acc_assign$GBIF_ID <- as.integer(as.character(non_acc_assign$GBIF_ID))
+names_plantnet[is.na(names_plantnet$GBIF_ID) ,]<- non_acc_assign
+
+
+###
+# Change some that were still incorrect
+names_plantnet$GBIF[names_plantnet$GBIF %in% "Berberis japonica"] <- "Mahonia japonica"
+names_plantnet$GBIF_species[names_plantnet$GBIF %in%  "Gyrophyllum major"] <- "Anacis major"
+names_plantnet$GBIF_genus[names_plantnet$GBIF %in% "Gyrophyllum major"] <- "Anacis"
+names_plantnet$GBIF[names_plantnet$GBIF %in% "Gyrophyllum major"] <- "Anacis major"
+
+# We will look whether we can assign new ID's or accepted names
+non_acc <- names_plantnet[is.na(names_plantnet$GBIF_accepted),]
+# Look for accepted names
+acc <-  names_plantnet[!is.na(names_plantnet$GBIF_accepted),]
+
+# Assign
+non_acc$GBIF_accepted <- acc$GBIF_accepted[match(non_acc$GBIF, acc$GBIF)]
+non_acc$GBIF_ID <- acc$GBIF_ID[match(non_acc$GBIF, acc$GBIF)]
+
+# Change
+change <- data.frame(old = non_acc$GBIF[is.na(non_acc$GBIF_accepted)],
+                     new = c("Alopecurus gerardi Vill.","Genista etnensis (Raf.) DC.","Anacis major (Walter) Z.H.Feng, Z.J.Huang & Su Liu",
+                             "Anacis major (Walter) Z.H.Feng, Z.J.Huang & Su Liu", "Anacis verticillata (L.) Z.H.Feng, Z.J.Huang & Su Liu", 
+                             "Meiosperma bracteatum (Hochst.) I.Darbysh. & E.A.Tripp", "Hieracium megacephalon Nash","Rhamphospermum carinatum A.Braun comb. ined.", 
+                             "Oreomecon crocea (Ledeb.) Banfi, Bartolucci, J.-M.Tison & Galasso", "Oreomecon lapponica (Tolm.) Galasso, Banfi & Bartolucci", 
+                             "Oreomecon olchonensis (Peschkova) Galasso, Banfi & Bartolucci", "Oreomecon radicata (Rottb.) Banfi, Bartolucci, J.-M.Tison & Galasso",
+                             "Claytosmunda claytoniana subsp. vestita (Milde) Lehnert", "Phoebanthus grandiflorus (Torr. & A. Gray) S. F. Blake",
+                             "Salimenaea integrifolia (Griseb.) N.O'Leary & P.Moroni", 
+                             "Troncosoa seriphioides (A.Gray) N.O'Leary & P.Moroni", "Valeriana orientalis (DC.) Sennikov"))
+
+# Assign
+non_acc$GBIF_accepted[is.na(non_acc$GBIF_ID)] <- change$new[match(non_acc$GBIF[is.na(non_acc$GBIF_ID)], change$old)]
+non_acc$GBIF_ID <- as.integer(as.character(non_acc$GBIF_ID))
+names_plantnet[is.na(names_plantnet$GBIF_accepted),] <- non_acc
+
+# All names are assigned
+```
+
+### ID
+```{r}
+# 17 have no ID yet
+non_acc <- names_plantnet[is.na(names_plantnet$GBIF_ID),]
+# Check with GBIF
+gbif <-  name_backbone_checklist(non_acc$GBIF_accepted[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(non_acc$GBIF_accepted)/2*(i-1))
+  end <- floor(length(non_acc$GBIF_accepted)/2 * i)
+  # run 
+  data <- name_backbone_checklist(non_acc$GBIF_accepted[begin: end])
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+# Some do now have an ID
+gbif <- gbif[gbif$verbatim_name %in% c("Alopecurus gerardi Vill.","Hieracium megacephalon Nash","Phoebanthus grandiflorus (Torr. & A. Gray) S. F. Blake"),]
+
+# Assign
+non_acc$GBIF_ID <- gbif$usageKey[match(non_acc$GBIF_accepted, gbif$verbatim_name)]
+non_acc$GBIF_ID <- as.integer(as.character(non_acc$GBIF_ID))
+names_plantnet[is.na(names_plantnet$GBIF_ID),] <- non_acc
+```
+
+
+
+
+## 3.4 Check
+### Duplicates
+```{r}
+#######
+# Duplicates in family
+dup <- names_plantnet |> group_by(GBIF_genus, GBIF_family) |> summarise(n = n())
+dup <- dup[duplicated(dup$GBIF_genus) | duplicated(dup$GBIF_genus, fromLast = T),]
+names_plantnet$GBIF_family[names_plantnet$GBIF_genus %in% dup$GBIF_genus] <- "Blechnaceae"
+# Fixed
+
+
+#######
+# Duplicates in genus
+dup <- names_plantnet |> group_by(GBIF_species, GBIF_genus, GBIF_family) |> summarise(n = n())
+dup <- dup[duplicated(dup$GBIF_species) | duplicated(dup$GBIF_species, fromLast = T),]
+dup <- dup[!is.na(dup$GBIF_species),]
+# Two are incorrect
+dup_correct <- dup[dup$GBIF_genus == vegdata::parse.taxa(dup$GBIF_species)[[2]],]
+names_plantnet$GBIF_family[names_plantnet$GBIF_species %in% dup_correct$GBIF_species] <- 
+  dup_correct$GBIF_family[match(names_plantnet$GBIF_species[names_plantnet$GBIF_species %in% dup_correct$GBIF_species], dup_correct$GBIF_species)]
+names_plantnet$GBIF_genus[names_plantnet$GBIF_species %in% dup_correct$GBIF_species] <- 
+  dup_correct$GBIF_genus[match(names_plantnet$GBIF_species[names_plantnet$GBIF_species %in% dup_correct$GBIF_species], dup_correct$GBIF_species)]
+# Fixed
+
+
+#######
+# Duplicates in species
+dup <- names_plantnet |> group_by(GBIF_subspecies, GBIF_species, GBIF_genus, GBIF_family) |> summarise(n = n())
+dup <- dup[duplicated(dup$GBIF_subspecies) | duplicated(dup$GBIF_subspecies, fromLast = T),]
+dup <- dup[!is.na(dup$GBIF_subspecies),]
+# These are all correct!
+
+
+
+#######
+# Duplicates in rank
+dup <- names_plantnet |> group_by(GBIF_rank, GBIF_subspecies, GBIF_species, GBIF_genus, GBIF_family) |> summarise(n = n())
+dup <- dup[duplicated(dup$GBIF_species) | duplicated(dup$GBIF_species, fromLast = T),]
+# None seem incorrect
+
+# Duplicates in rank
+dup <- names_plantnet |> group_by(GBIF, GBIF_rank, GBIF_subspecies, GBIF_species, GBIF_genus, GBIF_family) |> summarise(n = n())
+dup <- dup[duplicated(dup$GBIF) | duplicated(dup$GBIF, fromLast = T),]
+dup_correct <- dup[c(2),]
+# Assign
+names_plantnet$GBIF_subspecies[names_plantnet$GBIF %in% dup_correct$GBIF] <- dup_correct$GBIF_subspecies
+names_plantnet$GBIF_species[names_plantnet$GBIF %in% dup_correct$GBIF] <- dup_correct$GBIF_species
+names_plantnet$GBIF_rank[names_plantnet$GBIF %in% dup_correct$GBIF] <- dup_correct$GBIF_rank
+```
+
+
+### Ranks Plantnet
+```{r}
+# We will subdivide between the original data and the final data
+names_plantnet$GBIF_rank[grepl("sect\\.", names_plantnet$GBIF_accepted)] <- "SECTOR"
+names_plantnet$GBIF_rank[grepl("cv\\.", names_plantnet$GBIF_accepted)] <- "CULTIVAR"
+names_plantnet$GBIF_rank[grepl("subsp\\.", names_plantnet$GBIF_accepted)] <- "SUBSPECIES"
+names_plantnet$GBIF_rank[grepl(" x ", names_plantnet$GBIF_accepted)] <- "HYBRID"
+names_plantnet$GBIF_rank[grepl("×", names_plantnet$GBIF_accepted)] <- "HYBRID"
+
+
+# Save plantnet names
+#write_csv(names_plantnet, "../Extra/Intermediate/Plantnet_names_cleaning_newest_newest.csv")
+```
+
+
+### Final name
+```{r}
+# Get final name
+names_plantnet_extra <- names_plantnet
+names_plantnet_extra$final <- names_plantnet_extra$GBIF_subspecies
+names_plantnet_extra$final[is.na(names_plantnet_extra$final)] <- names_plantnet_extra$GBIF_species[is.na(names_plantnet_extra$final)] 
+names_plantnet_extra$final[is.na(names_plantnet_extra$final)] <- names_plantnet_extra$GBIF_genus[is.na(names_plantnet_extra$final)] 
+
+# Check which differ
+check <- names_plantnet_extra[names_plantnet_extra$GBIF != names_plantnet_extra$final, ]
+# They are always the same, perfect
+```
+
+
+
+## 3.5 Save
+```{r}
+pol_plantnet$GBIF_subspecies <- names_plantnet$GBIF_subspecies[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_species <- names_plantnet$GBIF_species[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_genus <- names_plantnet$GBIF_genus[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_family <- names_plantnet$GBIF_family[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_ID_final<- names_plantnet$GBIF_ID[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_accepted_name <- names_plantnet$GBIF_accepted[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_name <- names_plantnet$GBIF[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_rank <- names_plantnet$GBIF_rank[match(pol_plantnet$Name, names_plantnet$Name)]
+
+#write_csv(pol_plantnet, "../Results/Plantnet_identification_all.csv")
+#pol_plantnet <- read_csv( "../Results/Plantnet_identification_all.csv", show_col_types = FALSE)
+```
+
+
+
+
+```{r}
+# We will assign to the original database
+all_data$Plantnet_subspecies <- pol_plantnet$GBIF_subspecies[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_species <- pol_plantnet$GBIF_species[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_genus <- pol_plantnet$GBIF_genus[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_family <- pol_plantnet$GBIF_family[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plant_plantnet <- pol_plantnet$GBIF_name[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_rank <- pol_plantnet$GBIF_rank[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_GBIF_ID <- pol_plantnet$GBIF_ID_final[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_GBIF_accepted_name <- pol_plantnet$GBIF_accepted_name[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_organ <- pol_plantnet$Organ[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_score <- pol_plantnet$Score[match(all_data$Obs_ID, pol_plantnet$ID)]
+
+# Check number of species again
+check <- all_data |> distinct(Plant_plantnet, Plantnet_rank, Plantnet_subspecies, Plantnet_species, Plantnet_genus, Plantnet_family)
+all_data_save <- all_data
+all_data <- all_data_save
+```
+
+
+
+
+# USER
+## 4.1 Load
+```{r}
+# Get data
+user <- all_data |> distinct( User_original)
+user <-  data.frame(User_original = user[!is.na(user$User_original),])
+# 3644
+
+# Get all relevant columns
+user$User_GBIF <- NA
+user$User_rank <- NA
+user$User_GBIF_ID <- NA
+user$User_GBIF_accepted_name <- NA
+user$User_subspecies <- NA
+user$User_species <- NA
+user$User_genus <- NA
+user$User_family<- NA
+user$validated <- NA
+```
+
+
+```{r}
+# First check against our own database
+check <- user[user$User_original %in% names_plantnet$GBIF,]
+check$validated <- T
+check$User_subspecies <- names_plantnet$GBIF_subspecies[match(check$User_original, names_plantnet$GBIF)]
+check$User_species <- names_plantnet$GBIF_species[match(check$User_original, names_plantnet$GBIF)]
+check$User_genus <- names_plantnet$GBIF_genus[match(check$User_original, names_plantnet$GBIF)]
+check$User_family <- names_plantnet$GBIF_family[match(check$User_original, names_plantnet$GBIF)]
+check$User_GBIF_accepted_name <- names_plantnet$GBIF_accepted[match(check$User_original, names_plantnet$GBIF)]
+check$User_GBIF_ID <- names_plantnet$GBIF_ID[match(check$User_original, names_plantnet$GBIF)]
+check$User_GBIF <- names_plantnet$GBIF[match(check$User_original, names_plantnet$GBIF)]
+check$User_rank <- names_plantnet$GBIF_rank[match(check$User_original, names_plantnet$GBIF)]
+
+# Here is a version to compare
+user_save <- user
+user_save[user_save$User_original %in% names_plantnet$GBIF,] <- check
+
+# User remaining
+user <- user_save[is.na(user_save$validated),]
+sum(is.na(user_save$validated))
+# 1778 remain
+```
+
+
+
+## 4.2 GBIF
+```{r}
+# We use GBIF 
+# We use the original name to avoid inconsistencies
+gbif <- name_backbone_checklist(user$User_original[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(user$User_original)/10*(i-1))
+  end <- floor(length(user$User_original)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(user$User_original[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+gbif_nine <- gbif
+```
+
+### Animalia
+```{r}
+# Animals
+gbif_non_plant <- gbif[gbif$kingdom != "Plantae" & !is.na(gbif$usageKey),]
+
+# We use the original name to avoid inconsistencies again, some genera etc are both plants and bees 
+gbif_check <- name_backbone_checklist(gbif_non_plant$verbatim_name[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(gbif_non_plant$verbatim_name)/10*(i-1))
+  end <- floor(length(gbif_non_plant$verbatim_name)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(gbif_non_plant$verbatim_name[begin: end], kingdom = "Plantae")
+  gbif_check <- bind_rows(gbif_check, data_gbif)
+}
+gbif_check <- gbif_check[-1,]
+
+# Check
+check <- gbif_check[!is.na(gbif_check$phylum),]
+check <- check[check$kingdom %in% "Plantae",]
+check <- check[!grepl("Andrena|Osmia|Bombus|Araneae|Coleoptera|Lasius", check$verbatim_name), ]
+check <- check[check$verbatim_name %in% c("Taraxacum sect. Hamata", "Hedera spec.","Pastinaca spec."),]
+
+# Remove the plants here
+gbif_non_plant <- gbif_non_plant[!gbif_non_plant$verbatim_name %in% check$verbatim_name,]
+
+
+# Remove these all
+user_save <- user_save[!user_save$User_original %in% gbif_non_plant$verbatim_name,]
+# We also remove these from our overall database (997)
+nrow(all_data[all_data$User_original %in%  gbif_non_plant$verbatim_name,] )
+all_data <- all_data[!all_data$User_original %in%  gbif_non_plant$verbatim_name,] 
+
+
+
+# Later we found some more, also remove (20)
+user_save <- user_save[!user_save$User_original %in% c("Osmia spec.", "Campanella spec", "Hunter", "Acari indet.", "Halictini indet.", "Sternorrhyncha indet.", 
+                                                       "Pisces spec.", "Angler", "Bryophyta indet.", "Pteropsida indet."),]
+check <- all_data[all_data$User_original %in%  c("Osmia spec.", "Campanella spec", "Hunter", "Acari indet.", "Halictini indet.", "Sternorrhyncha indet.", 
+                                                       "Pisces spec.", "Angler",  "Bryophyta indet.", "Pteropsida indet." ),] 
+all_data <- all_data[!all_data$User_original %in% check$User_original,] 
+
+
+# We will also remove the data which is at a too high level from the dataset here, but these are plants so can be kept in the dataset
+user_save <- user_save[!user_save$User_original %in% c("Plantae indet.",  "Pinopsida indet.", "Bambusoideae indet."),]
+all_data$User_original[all_data$User_original %in%  c("Plantae indet.",  "Pinopsida indet.", "Bambusoideae indet.")] <- NA
+# 3344 user species left
+```
+
+
+### Accepted
+```{r}
+user <- user_save[is.na(user_save$validated),]
+#######
+gbif_acc <- gbif[gbif$status == "ACCEPTED" & gbif$matchType == "EXACT" & !gbif$verbatim_name %in% gbif_non_plant$verbatim_name,]
+
+
+# Create final data
+gbif_acc$final <- gbif_acc$subspecies
+gbif_acc$final[is.na(gbif_acc$final)] <- gbif_acc$form[is.na(gbif_acc$final)]
+gbif_acc$final[is.na(gbif_acc$final)] <- gbif_acc$variety[is.na(gbif_acc$final)]
+gbif_acc$final[is.na(gbif_acc$final)] <- gbif_acc$species[is.na(gbif_acc$final)]
+gbif_acc$final[is.na(gbif_acc$final)] <- gbif_acc$genus[is.na(gbif_acc$final)]
+gbif_acc$final[is.na(gbif_acc$final)] <- gbif_acc$family[is.na(gbif_acc$final)]
+# Keys
+gbif_acc$final_key <- gbif_acc$subspeciesKey
+gbif_acc$final_key[is.na(gbif_acc$final_key)] <- gbif_acc$formKey[is.na(gbif_acc$final_key)]
+gbif_acc$final_key[is.na(gbif_acc$final_key)] <- gbif_acc$varietyKey[is.na(gbif_acc$final_key)]
+gbif_acc$final_key[is.na(gbif_acc$final_key)] <- gbif_acc$speciesKey[is.na(gbif_acc$final_key)]
+gbif_acc$final_key[is.na(gbif_acc$final_key)] <- gbif_acc$genusKey[is.na(gbif_acc$final_key)]
+gbif_acc$final_key[is.na(gbif_acc$final_key)] <- gbif_acc$familyKey[is.na(gbif_acc$final_key)]
+
+
+#######
+# Check accepted
+# Check whether they are the same as the verbatim names
+gbif_acc$verbatim_name_new <- gsub("subsp. ", "", gbif_acc$verbatim_name)
+gbif_acc$verbatim_name_new <- gsub("var. ", "", gbif_acc$verbatim_name_new)
+gbif_acc$validated <- NA
+# Reduce dataset to those observations for which there is a difference between the final and accepted name
+check <- gbif_acc[!gbif_acc$verbatim_name_new == gbif_acc$final,]
+# This is due to problems in terms of extra information originally given by the user
+
+
+######
+# We include this in the rank info
+gbif_acc$rank_again <- NA
+# Cultivars
+gbif_acc$rank_again[grepl("(cultivar)", gbif_acc$verbatim_name_new)] <- "cultivar"
+gbif_acc$rank_again[grepl("'[^']+'", gbif_acc$verbatim_name_new)] <- "cultivar"
+gbif_acc$rank_again[grepl("auct. hort", gbif_acc$verbatim_name_new)] <- "cultivar"
+# Sector data
+gbif_acc$rank_again[grepl("sect.", gbif_acc$verbatim_name_new)] <- "sector"
+# Forma data
+gbif_acc$rank_again[grepl("f. ", gbif_acc$verbatim_name_new)] <- "form"
+# Aggregated species
+gbif_acc$rank_again[grepl("\\+", gbif_acc$verbatim_name_new)] <- "aggregate"
+# Hybrids
+gbif_acc$rank_again[grepl(" x ", gbif_acc$verbatim_name_new)] <- "hybrid"
+# Subgenera
+gbif_acc$rank_again[grepl("subg. ", gbif_acc$verbatim_name_new)] <- "genus"
+# Uncertainties (just accepted)
+gbif_acc$rank_again[grepl("s\\.l\\.", gbif_acc$verbatim_name_new)] <- "species"
+gbif_acc$rank_again[grepl("s\\.s\\.", gbif_acc$verbatim_name_new)] <- "species"
+
+# Some are remaining and will be resolved manually
+gbif_acc$rank_again[gbif_acc$verbatim_name %in% "Agave americana var. expansa"] <- "variety"
+gbif_acc$verbatim_name_new[gbif_acc$verbatim_name %in% "Agave americana var. expansa"] <- "Agave americana expansa"
+
+
+
+#####
+# Create subspecies and variety combined data (these are all together within subspecies column)
+gbif_acc$smallest <- gbif_acc$subspecies
+gbif_acc$smallest[is.na(gbif_acc$smallest)] <- gbif_acc$form[is.na(gbif_acc$smallest)]
+gbif_acc$smallest[is.na(gbif_acc$smallest)] <- gbif_acc$variety[is.na(gbif_acc$smallest)]
+# Keys
+gbif_acc$smallest_key <- gbif_acc$subspeciesKey
+gbif_acc$smallest_key[is.na(gbif_acc$smallest_key)] <- gbif_acc$formKey[is.na(gbif_acc$smallest_key)]
+gbif_acc$smallest_key[is.na(gbif_acc$smallest_key)] <- gbif_acc$varietyKey[is.na(gbif_acc$smallest_key)]
+
+# Assign changed ranks
+user$User_rank <- gbif_acc$rank_again[match(user$User_original, gbif_acc$verbatim_name)]
+# Assign Subspecies
+user$User_subspecies <- gbif_acc$smallest[match(user$User_original, gbif_acc$verbatim_name)]
+user$User_GBIF_ID <- gbif_acc$smallest_key[match(user$User_original, gbif_acc$verbatim_name)]
+user$User_rank[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- "subspecies"
+# Assign species
+user$User_species <- gbif_acc$species[match(user$User_original, gbif_acc$verbatim_name)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_acc$speciesKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_acc$verbatim_name)]
+user$User_rank[!is.na(user$User_species) & is.na(user$User_rank)] <- "species"
+# Assign genus
+user$User_genus <- gbif_acc$genus[match(user$User_original, gbif_acc$verbatim_name)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_acc$genusKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_acc$verbatim_name)]
+# Assign family
+user$User_family <- gbif_acc$family[match(user$User_original, gbif_acc$verbatim_name)]
+# Assign final names
+user$User_GBIF <- gbif_acc$final[match(user$User_original, gbif_acc$verbatim_name)]
+user$User_GBIF_accepted_name <- gbif_acc$scientificName[match(user$User_original, gbif_acc$verbatim_name)]
+user$validated[!is.na(user$User_GBIF)] <- T
+
+# Assign
+user_save[is.na(user_save$validated),] <- user
+# Remaining
+sum(is.na(user$validated))
+# 1127
+```
+
+
+### Higher
+```{r}
+######
+# Get smaller dataset
+user <- user_save[is.na(user_save$validated),]
+# Higher ranks
+gbif_acc <- gbif[gbif$status == "ACCEPTED" & gbif$matchType == "HIGHERRANK",]
+
+# Get all the ones that are genera
+# Only get the genera
+gbif_gen <- gbif_acc[grepl(" spec\\.",gbif_acc$verbatim_name), ]
+
+# Check which are equal
+check <- gbif_gen[gbif_gen$genus == gsub(" spec\\.","", gbif_gen$verbatim_name) & !is.na(gbif_gen$genus),]
+
+# These may already be assigned
+user$User_genus <- check$genus[match(user$User_original, check$verbatim_name)]
+user$User_GBIF_ID <- check$genusKey[match(user$User_original, check$verbatim_name)]
+user$User_family <- check$family[match(user$User_original, check$verbatim_name)]
+user$User_GBIF_accepted_name <- check$scientificName[match(user$User_original, check$verbatim_name)]
+user$User_GBIF <- check$genus[match(user$User_original, check$verbatim_name)]
+user$User_rank[!is.na(user$User_genus)] <- "genus"
+user$validated[!is.na(user$User_genus)] <- T
+
+# Assign
+user_save[is.na(user_save$validated),] <- user
+# Remaining
+sum(is.na(user$validated))
+# 692
+```
+
+
+### Synonym
+```{r}
+######
+# Get smaller dataset again
+user <- user_save[is.na(user_save$validated),]
+
+
+######
+# Synonyms
+gbif_syn <- gbif[gbif$status %in% "SYNONYM" & gbif$matchType == "EXACT",]
+gbif_syn <- gbif_syn[!gbif_syn %in% user_save$User_original[!is.na(user_save$validated)]]
+
+
+# Create final data (subspecies, variety and forma)
+gbif_syn$final <- gbif_syn$subspecies
+gbif_syn$final[is.na(gbif_syn$final)] <- gbif_syn$form[is.na(gbif_syn$final)]
+gbif_syn$final[is.na(gbif_syn$final)] <- gbif_syn$variety[is.na(gbif_syn$final)]
+# Create final keys
+gbif_syn$usageKey[!is.na(gbif_syn$acceptedUsageKey)] <- gbif_syn$acceptedUsageKey[!is.na(gbif_syn$acceptedUsageKey)]
+gbif_syn$scientificName[!is.na(gbif_syn$acceptedScientificName)] <- gbif_syn$acceptedScientificName[!is.na(gbif_syn$acceptedScientificName)]
+
+
+# Again change some ranks
+# We include this in the rank info
+gbif_syn$rank_again <- NA
+# Cultivars
+gbif_syn$rank_again[grepl("(cultivar)", gbif_syn$verbatim_name)] <- "cultivar"
+gbif_syn$rank_again[grepl("'[^']+'", gbif_syn$verbatim_name)] <- "cultivar"
+gbif_syn$rank_again[grepl("auct. hort", gbif_syn$verbatim_name)] <- "cultivar"
+# Sector data
+gbif_syn$rank_again[grepl("sect.", gbif_syn$verbatim_name)] <- "sector"
+# Forma data
+gbif_syn$rank_again[grepl("f. ", gbif_syn$verbatim_name)] <- "form"
+# Aggregated species
+gbif_syn$rank_again[grepl("\\+", gbif_syn$verbatim_name)] <- "aggregate"
+# Hybrids
+gbif_syn$rank_again[grepl(" x ", gbif_syn$verbatim_name)] <- "hybrid"
+# Subgenera
+gbif_syn$rank_again[grepl("subg. ", gbif_syn$verbatim_name)] <- "genus"
+# Uncertainties (just accepted)
+gbif_syn$rank_again[grepl("s\\.l\\.", gbif_syn$verbatim_name)] <- "species"
+gbif_syn$rank_again[grepl("s\\.s\\.", gbif_syn$verbatim_name)] <- "species"
+
+
+# Assign changed ranks
+user$User_rank <- gbif_syn$rank_again[match(user$User_original, gbif_syn$verbatim_name)]
+# Assign Subspecies
+user$User_subspecies <- gbif_syn$final[match(user$User_original, gbif_syn$verbatim_name)]
+user$User_GBIF_ID <- gbif_syn$usageKey[match(user$User_original, gbif_syn$verbatim_name)]
+user$User_rank[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- "subspecies"
+# Assign species
+user$User_species <- gbif_syn$species[match(user$User_original, gbif_syn$verbatim_name)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_syn$usageKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_syn$verbatim_name)]
+user$User_rank[!is.na(user$User_species) & is.na(user$User_rank)] <- "species"
+# Assign genus
+user$User_genus <- gbif_syn$genus[match(user$User_original, gbif_syn$verbatim_name)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_syn$usageKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_syn$verbatim_name)]
+# Assign family
+user$User_family <- gbif_syn$family[match(user$User_original, gbif_syn$verbatim_name)]
+# Assign final names
+gbif_syn$final[is.na(gbif_syn$final)] <- gbif_syn$species[is.na(gbif_syn$final)]
+gbif_syn$final[is.na(gbif_syn$final)] <- gbif_syn$genus[is.na(gbif_syn$final)]
+user$User_GBIF <- gbif_syn$final[match(user$User_original, gbif_syn$verbatim_name)]
+user$User_GBIF_accepted_name <- gbif_syn$scientificName[match(user$User_original, gbif_syn$verbatim_name)]
+user$validated[!is.na(user$User_GBIF)] <- T
+
+
+# Assign
+user_save[is.na(user_save$validated),] <- user
+sum(is.na(user_save$validated))
+# 427 remain
+```
+
+
+## 4.3 GBIFv2
+```{r}
+# Remaining
+user <- user_save[is.na(user_save$validated),] 
+
+# Many are genera with spp. as an indicator
+# Remove spp. and check again against gbif
+user$new_name <- gsub(" spec\\..*$", "", user$User_original)
+user$new_name <- gsub("\\s*\\([^)]*\\)", "", user$new_name)
+user$new_name <- gsub(" agg\\..*$", "", user$new_name)
+user$new_name <- gsub(" indet\\..*$", "", user$new_name)
+user$new_name <- gsub(" s\\.l\\.", "", user$new_name)
+user$new_name <- gsub(" s\\.s\\.", "", user$new_name)
+user$new_name <- gsub(" '[^']+'", "", user$new_name)
+
+
+# Check gbif again
+gbif <-  name_backbone_checklist(user$new_name[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(user$new_name)/2*(i-1))
+  end <- floor(length(user$new_name)/2 * i)
+  # run 
+  data <- name_backbone_checklist(user$new_name[begin: end], kingdom = "Plantae")
+  gbif <- bind_rows(gbif, data)
+}
+gbif <- gbif[-1,]
+gbif_ten <- gbif
+```
+
+
+### Accepted
+```{r}
+# Get accepted and exact
+gbif_acc <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "EXACT",]
+
+# Get all names
+gbif_acc$final <- gbif_acc$species
+gbif_acc$final[is.na(gbif_acc$final)] <- gbif_acc$genus[is.na(gbif_acc$final)]
+gbif_acc$final[is.na(gbif_acc$final)] <- gbif_acc$family[is.na(gbif_acc$final)]
+
+
+# Check how well they correspond
+gbif_acc$verbatim_name_new <- gsub(" x ", " ", gbif_acc$verbatim_name)
+check <- gbif_acc[!gbif_acc$verbatim_name_new == gbif_acc$final & !is.na(gbif_acc$verbatim_name),]
+gbif_acc$rank_again <- NA
+gbif_acc$rank_again[grepl(" x ", gbif_acc$verbatim_name)] <- "hybrid"
+# Looks fine, all assign
+
+
+#####
+# Assign changed ranks
+user$User_rank <- gbif_acc$rank_again[match(user$new_name, gbif_acc$verbatim_name)]
+# Assign species
+user$User_species <- gbif_acc$species[match(user$new_name, gbif_acc$verbatim_name)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_acc$speciesKey[match(user$new_name[is.na(user$User_GBIF_ID)] , gbif_acc$verbatim_name)]
+user$User_rank[!is.na(user$User_species) & is.na(user$User_rank)] <- "species"
+# Assign genus
+user$User_genus <- gbif_acc$genus[match(user$new_name, gbif_acc$verbatim_name)]
+user$User_rank[!is.na(user$User_genus) & is.na(user$User_rank)] <- "genus"
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_acc$genusKey[match(user$new_name[is.na(user$User_GBIF_ID)] , gbif_acc$verbatim_name)]
+# Assign family
+user$User_family <- gbif_acc$family[match(user$new_name, gbif_acc$verbatim_name)]
+user$User_rank[!is.na(user$User_family) & is.na(user$User_rank)] <- "family"
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_acc$familyKey[match(user$new_name[is.na(user$User_GBIF_ID)] , gbif_acc$verbatim_name)]
+# Assign final names
+user$User_GBIF <- gbif_acc$final[match(user$new_name, gbif_acc$verbatim_name)]
+user$User_GBIF_accepted_name <- gbif_acc$scientificName[match(user$new_name, gbif_acc$verbatim_name)]
+user$validated[!is.na(user$User_GBIF)] <- T
+
+
+# Assign
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 182 left
+```
+
+
+### Variant
+```{r}
+# Remaining
+user <- user_save[is.na(user_save$validated),] 
+
+# Remove spp. and check again against gbif
+user$new_name <- gsub(" spec\\..*$", "", user$User_original)
+user$new_name <- gsub("\\s*\\([^)]*\\)", "", user$new_name)
+user$new_name <- gsub(" agg\\..*$", "", user$new_name)
+user$new_name <- gsub(" indet\\..*$", "", user$new_name)
+user$new_name <- gsub(" s\\.l\\.", "", user$new_name)
+user$new_name <- gsub(" s\\.s\\.", "", user$new_name)
+user$new_name <- gsub(" '[^']+'", "", user$new_name)
+
+# Get all variants
+gbif_var <- gbif[gbif$status %in% c("PROVISIONALLY_ACCEPTED","ACCEPTED") & gbif$matchType %in% c("EXACT", "VARIANT"),]
+gbif_var <- gbif_var[gbif_var$verbatim_name %in% user$new_name,]
+
+# Here are some that have to be looked at
+change <- c("Veronica sect. Pseudolysimachium", "Eupatorieae","Heliantheae", "Plantae", "Bryophyta", "Pinopsida")
+gbif_var <- gbif_var[!gbif_var$verbatim_name %in% change,]
+
+
+#####
+# Assign Subspecies
+user$User_subspecies <- gbif_var$subspecies[match(user$User_original, gbif_var$verbatim_name)]
+user$User_GBIF_ID <- gbif_var$usageKey[match(user$User_original, gbif_var$verbatim_name)]
+user$User_rank[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- "subspecies"
+# Assign species
+user$User_species <- gbif_var$species[match(user$new_name, gbif_var$verbatim_name)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_var$speciesKey[match(user$new_name[is.na(user$User_GBIF_ID)] , gbif_var$verbatim_name)]
+user$User_rank[!is.na(user$User_species) & is.na(user$User_rank)] <- "species"
+# Assign genus
+user$User_genus <- gbif_var$genus[match(user$new_name, gbif_var$verbatim_name)]
+user$User_rank[!is.na(user$User_genus) & is.na(user$User_rank)] <- "genus"
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_var$genusKey[match(user$new_name[is.na(user$User_GBIF_ID)] , gbif_var$verbatim_name)]
+# Assign family
+user$User_family <- gbif_var$family[match(user$new_name, gbif_var$verbatim_name)]
+user$User_rank[!is.na(user$User_family) & is.na(user$User_rank)] <- "family"
+# Assign final names
+user$User_GBIF <- gbif_var$canonicalName[match(user$new_name, gbif_var$verbatim_name)]
+user$User_GBIF_accepted_name <- gbif_var$scientificName[match(user$new_name, gbif_var$verbatim_name)]
+user$validated[!is.na(user$User_GBIF)] <- T
+
+
+# Assign
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 168 remaining
+```
+
+
+### Aggregates
+```{r}
+# User again
+user <- user[is.na(user$validated),]
+
+# We will now only look at the aggregates
+agg <- user[grepl("\\s*\\+\\s*", user$User_original) ,]
+# We remove one, all the rest have the same genus
+agg <- agg[!agg$User_original %in% "Tripleurospermum maritimum + Matricaria chamomilla",]
+# Get the genera
+agg$User_genus <- sub("^(\\S+).*", "\\1", agg$User_original)
+
+# We will have to look whether they exist and what their ID is
+# Check gbif again
+gbif_gen <-  name_backbone_checklist(agg$User_genus[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(agg$User_genus)/2*(i-1))
+  end <- floor(length(agg$User_genus)/2 * i)
+  # run 
+  data <- name_backbone_checklist(agg$User_genus[begin: end], kingdom = "Plantae")
+  gbif_gen <- bind_rows(gbif_gen, data)
+}
+gbif_gen <- gbif_gen[-1,]
+
+# Assign
+agg$User_GBIF_ID <- gbif_gen$usageKey[match(agg$User_genus, gbif_gen$verbatim_name)]
+agg$User_GBIF_accepted_name <- gbif_gen$scientificName[match(agg$User_genus, gbif_gen$verbatim_name)]
+agg$User_family <- gbif_gen$family[match(agg$User_genus, gbif_gen$verbatim_name)]
+agg$User_GBIF <- gbif_gen$genus[match(agg$User_genus, gbif_gen$verbatim_name)]
+agg$User_rank <- "aggregate"
+agg$validated <-T
+
+# Assign
+user[user$User_original %in% agg$User_original,] <- agg
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 130 remaining
+```
+
+### Higher
+```{r}
+# User again
+user <- user[is.na(user$validated),]
+
+# Check how they look in gbif
+gbif_remaining <- gbif[gbif$verbatim_name %in% user$new_name,]
+# Higher ranks
+gbif_gen <- gbif_remaining[gbif_remaining$status == "ACCEPTED" & gbif_remaining$matchType == "HIGHERRANK",]
+
+# Get all the ones that are genera
+check <- gbif_gen[gbif_gen$genus == gbif_gen$verbatim_name & !is.na(gbif_gen$genus),]
+
+# These may already be assigned
+user$User_genus <- check$genus[match(user$new_name, check$verbatim_name)]
+user$User_GBIF_ID <- check$genusKey[match(user$new_name, check$verbatim_name)]
+user$User_family <- check$family[match(user$new_name, check$verbatim_name)]
+user$User_GBIF_accepted_name <- check$scientificName[match(user$new_name, check$verbatim_name)]
+user$User_GBIF <- check$genus[match(user$new_name, check$verbatim_name)]
+user$User_rank[!is.na(user$User_genus)] <- "genus"
+user$validated[!is.na(user$User_genus)] <- T
+
+# Assign
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 110 remaining
+```
+
+
+### Sector
+```{r}
+# Many remaining are sector, we treat them as we treated aggregates
+# We will now only look at the aggregates
+user <- user[is.na(user$validated),]
+sec <- user[grepl("sect.", user$User_original) ,]
+# Get the genera
+sec$User_genus <- sub("^(\\S+).*", "\\1", sec$User_original)
+
+# We will have to look whether they exist and what their ID is
+# Check gbif again
+gbif_gen <-  name_backbone_checklist(sec$User_genus[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(sec$User_genus)/2*(i-1))
+  end <- floor(length(sec$User_genus)/2 * i)
+  # run 
+  data <- name_backbone_checklist(sec$User_genus[begin: end], kingdom = "Plantae")
+  gbif_gen <- bind_rows(gbif_gen, data)
+}
+gbif_gen <- gbif_gen[-1,]
+
+
+# Assign
+sec$User_GBIF_ID <- gbif_gen$usageKey[match(sec$User_genus, gbif_gen$verbatim_name)]
+sec$User_GBIF_accepted_name <- gbif_gen$scientificName[match(sec$User_genus, gbif_gen$verbatim_name)]
+sec$User_family <- gbif_gen$family[match(sec$User_genus, gbif_gen$verbatim_name)]
+sec$User_GBIF <- gbif_gen$genus[match(sec$User_genus, gbif_gen$verbatim_name)]
+sec$User_rank <- "sector"
+sec$validated <-T
+
+# Taraxacum keeps being anoying
+sec$User_GBIF_accepted_name[sec$User_genus %in% "Taraxacum"] <- "Taraxacum Weber"
+sec$User_GBIF_ID[sec$User_genus %in% "Taraxacum"] <- 7787708
+sec$User_GBIF[sec$User_genus %in% "Taraxacum"] <- "Taraxacum"
+
+# Assign
+user[user$User_original %in% sec$User_original,] <- sec
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 100 remaining
+
+# Save user save 
+user_save_save <- user_save
+```
+
+
+### Tribes
+```{r}
+# User again
+user <- user[is.na(user$validated),]
+
+# Some remaining are tribes from the Asteraceae family
+tribes_subfamilies <- c("Astereae spec.", "Senecieae spec.", "Eupatorieae spec.",  "Cardueae spec.",  "Anthemideae spec.", "Heliantheae spec.", 
+                        "Calendulaea spec.",  "Cichorieae spec.", "Carduoideae indet.")
+user$User_family[user$User_original %in% tribes_subfamilies] <- "Asteraceae"
+user$User_rank[user$User_original %in% tribes_subfamilies] <- "tribe"
+user$User_rank[user$User_original %in% c("Carduoideae indet.")] <- "subfamily"
+user$User_GBIF[user$User_original %in% tribes_subfamilies] <- gsub(" spec.", "", user$User_original[user$User_original %in% tribes_subfamilies] )
+user$User_GBIF_ID[user$User_original %in% tribes_subfamilies] <- 3065
+user$User_GBIF_accepted_name[user$User_original %in% tribes_subfamilies] <- "Asteraceae"
+user$validated[user$User_original %in% tribes_subfamilies] <- T
+
+# Assign
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 91 remaining
+```
+
+
+### Old
+```{r}
+# User again
+user <- user[is.na(user$validated),]
+
+# Check 
+check <- user[user$User_original %in% names_plantnet$Name,]
+check$User_subspecies <- names_plantnet$GBIF_subspecies[match(check$User_original, names_plantnet$Name)]
+check$User_species <- names_plantnet$GBIF_species[match(check$User_original, names_plantnet$Name)]
+check$User_genus <- names_plantnet$GBIF_genus[match(check$User_original, names_plantnet$Name)]
+check$User_family <- names_plantnet$GBIF_family[match(check$User_original, names_plantnet$Name)]
+check$User_GBIF_accepted_name <- names_plantnet$GBIF_accepted[match(check$User_original, names_plantnet$Name)]
+check$User_GBIF_ID <- names_plantnet$GBIF_ID[match(check$User_original, names_plantnet$Name)]
+check$User_GBIF <- names_plantnet$GBIF[match(check$User_original, names_plantnet$Name)]
+check$User_rank <- names_plantnet$GBIF_rank[match(check$User_original, names_plantnet$Name)]
+check$validated <- T
+
+# Assign
+user[user$User_original %in% names_plantnet$Name,] <- check
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 76 remaining
+```
+
+
+### Verbose
+```{r}
+# User again
+user <- user[is.na(user$validated),]
+
+# Verbose function
+# We will have to look whether they exist and what their ID is
+verbose <-  as.data.frame(name_backbone_verbose(user$User_original[1])[2])[1,]
+for(i in 2: nrow(user)){ 
+  data <-  as.data.frame(name_backbone_verbose(user$User_original[i])[2])[1,]
+  verbose <- bind_rows(verbose, data)
+}
+
+# Get all plants
+acc_verbose <- verbose[verbose$alternatives.kingdom %in% "Plantae",]
+
+# Assign accepted
+acc_verbose$alternatives.usageKey[!is.na(acc_verbose$alternatives.acceptedUsageKey)] <-
+  acc_verbose$alternatives.acceptedUsageKey[!is.na(acc_verbose$alternatives.acceptedUsageKey)]
+acc_verbose$alternatives.scientificName[!is.na(acc_verbose$alternatives.acceptedScientificName)] <-
+  acc_verbose$alternatives.acceptedScientificName[!is.na(acc_verbose$alternatives.acceptedScientificName)]
+
+# Check which are incorrect 
+change <- data.frame(old = c("Cardaminopsis spec.", "Cardaminopsis spec.", "Eupatorium rugosum", 
+                            "Galeobdolon spec.", "Geranium macrorrhizum subsp. macrorrhizum", "Inula conyzae", 
+                            "Lavatera spec.", "Lavatera thuringiaca", "Lychnis spec.", "Lycopersicon esculentum",
+                            "Mimulus guttatus", "Oenothera hybrid s.l.", "Paeonia hybrida", "Perovskia spec.",
+                            "Potentilla rupestris", "Rosmarinus spec.", "Rubus genevieri", "Sorbus intermedia",
+                            "Trifolium speciosum"),
+                    new = c("Clinopodium L.", "Arabidopsis (DC.) Heynh.", 
+                            "Ageratina altissima (L.) R.M.King & H.Rob.", "Lamium L.",
+                            "Geranium dalmaticum (Beck) Rech. f.", 
+                            "Pentanema squarrosum (L.) D.Gut.Larr., Santos-Vicente, Anderb., E.Rico & M.M.Mart.Ort.",
+                            "Malva L.", "Malva thuringiaca subsp. thuringiaca", "Silene L.",
+                            "Solanum lycopersicum L.", "Erythranthe guttata (DC.) G.L.Nesom", 
+                            "Oenothera tetragona Roth", "Paeonia tenuifolia L.", "Salvia L.", 
+                            "Drymocallis rupestris (L.) Soják", "Salvia L.", "Rubus bracteatus Boreau", 
+                            "Hedlundia intermedia (Ehrh.) Mosyakin, Fedor. & McNeill", 
+                            "Trifolium grandiflorum Schreb."))
+
+# Remove these already
+acc_verbose <- acc_verbose[!acc_verbose$alternatives.verbatim_name %in% change$old,]
+
+# Assign Subspecies
+user$User_subspecies <- acc_verbose$alternatives.subspecies[match(user$User_original, acc_verbose$alternatives.verbatim_name)]
+user$User_GBIF_ID <- acc_verbose$alternatives.usageKey[match(user$User_original, acc_verbose$alternatives.verbatim_name)]
+user$User_GBIF[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- user$User_subspecies[!is.na(user$User_subspecies)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- "subspecies"
+# Assign species
+user$User_species <- acc_verbose$alternatives.species[match(user$User_original, acc_verbose$alternatives.verbatim_name)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- acc_verbose$alternatives.usageKey[match(user$User_original[is.na(user$User_GBIF_ID)] ,
+                                                                                       acc_verbose$alternatives.verbatim_name)]
+user$User_GBIF[!is.na(user$User_species)& is.na(user$User_rank)] <- user$User_species[!is.na(user$User_species)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_species) & is.na(user$User_rank)] <- "species"
+# Assign genus
+user$User_genus <- acc_verbose$alternatives.genus[match(user$User_original, acc_verbose$alternatives.verbatim_name)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- acc_verbose$alternatives.usageKey[match(user$User_original[is.na(user$User_GBIF_ID)] , acc_verbose$alternatives.verbatim_name)]
+user$User_GBIF[!is.na(user$User_genus)& is.na(user$User_rank)] <- user$User_genus[!is.na(user$User_genus)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_genus) & is.na(user$User_rank)] <- "genus"
+# Assign family
+user$User_family <- acc_verbose$alternatives.family[match(user$User_original, acc_verbose$alternatives.verbatim_name)]
+# Assign final names
+user$User_GBIF_accepted_name <- acc_verbose$alternatives.scientificName[match(user$User_original, acc_verbose$alternatives.verbatim_name)]
+user$validated[!is.na(user$User_GBIF)] <- T
+
+# Assign
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 41
+
+
+#####
+# User again
+user <- user[is.na(user$validated),]
+gbif_change <- name_backbone_checklist(change$new[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(change$new)/2*(i-1))
+  end <- floor(length(change$new)/2 * i)
+  # run 
+  data <- name_backbone_checklist(change$new[begin: end], kingdom = "Plantae")
+  gbif_change <- bind_rows(gbif_change, data)
+}
+gbif_change <- gbif_change[-1,]
+
+# One is still incorrect
+gbif_change <- gbif_change[!gbif_change$verbatim_name %in% c("Hedlundia intermedia (Ehrh.) Mosyakin, Fedor. & McNeill"),]
+gbif_change$old <- change$old[match(gbif_change$verbatim_name, change$new)]
+
+
+# Assign Subspecies
+user$User_subspecies <- gbif_change$subspecies[match(user$User_original, gbif_change$old)]
+user$User_GBIF_ID <- gbif_change$subspeciesKey[match(user$User_original, gbif_change$old)]
+user$User_GBIF[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- user$User_subspecies[!is.na(user$User_subspecies)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- "subspecies"
+# Assign species
+user$User_species <- gbif_change$species[match(user$User_original, gbif_change$old)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_change$speciesKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_change$old)]
+user$User_GBIF[!is.na(user$User_species)& is.na(user$User_rank)] <- user$User_species[!is.na(user$User_species)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_species) & is.na(user$User_rank)] <- "species"
+# Assign genus
+user$User_genus <- gbif_change$genus[match(user$User_original,gbif_change$old)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_change$genusKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_change$old)]
+user$User_GBIF[!is.na(user$User_genus)& is.na(user$User_rank)] <- user$User_genus[!is.na(user$User_genus)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_genus) & is.na(user$User_rank)] <- "genus"
+# Assign family
+user$User_family <- gbif_change$family[match(user$User_original,gbif_change$old)]
+# Assign final names
+user$User_GBIF_accepted_name <- gbif_change$scientificName[match(user$User_original, gbif_change$old)]
+user$validated[!is.na(user$User_GBIF)] <- T
+
+# Assign
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+# 25 remaining
+```
+
+
+### Remaining
+```{r}
+# The last ones I will just do manually
+user <- user_save[is.na(user_save$validated),] 
+
+# Manual changes against GBIF
+change <- data.frame(old = user$User_original,
+                     new = c("Salix gmelinii Pall.", "Veronica L.", "Taraxacum erythrospermum Andrz. ex Besser",
+                             "Clinopodium calamintha (L.) Kuntze", "Viola tricolor L.", "Salix cinerea subsp. cinerea", "Salvia L.", "Aconitum × cammarum L.", 
+                             "Petunia × atkinsiana D.Don ex Loudon", "Asteraceae", "Salvia × lavandulacea (de Noé) P.P.Ferrer", "Rhinanthus minor subsp. minor", 
+                             "Salix caprea x udensis", "Symphytum officinale subsp. officinale", "Allium paradoxum (M.Bieb.) G.Don","Acanthus mollis subsp. mollis" ,
+                             "Vaccinium angustifolium x corymbosum", 
+                             "Hedlundia intermedia (Ehrh.) Mosyakin, Fedor. & McNeill", "Petrosedum rupestre (L.) P.V.Heath", "Cota tinctoria subsp. tinctoria", 
+                             "Origanum vulgare subsp. virens (Hoffmanns. & Link) Bonnier & Layens", "Symphoricarpos Dill. ex Juss.", "Salix udensis x viminalis", 
+                             "Malus domestica (Suckow) Borkh.", "Cosmos Cav."))
+
+
+# Try again gbif, ID's would be good
+gbif_change <- name_backbone_checklist(change$new[1])
+for(i in 1: 2){
+  # boundaries
+  begin <- 1 + floor(length(change$new)/2*(i-1))
+  end <- floor(length(change$new)/2 * i)
+  # run 
+  data <- name_backbone_checklist(change$new[begin: end], kingdom = "Plantae")
+  gbif_change <- bind_rows(gbif_change, data)
+}
+gbif_change <- gbif_change[-1,]
+
+# Remove the higher ranks
+gbif_change <- gbif_change[gbif_change$matchType %in% "EXACT",]
+gbif_change$old <- change$old[match(gbif_change$verbatim_name, change$new)]
+
+# Assign Subspecies
+user$User_subspecies <- gbif_change$subspecies[match(user$User_original, gbif_change$old)]
+user$User_GBIF_ID <- gbif_change$subspeciesKey[match(user$User_original, gbif_change$old)]
+user$User_GBIF[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- user$User_subspecies[!is.na(user$User_subspecies)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_subspecies)& is.na(user$User_rank)] <- "subspecies"
+# Assign species
+user$User_species <- gbif_change$species[match(user$User_original, gbif_change$old)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_change$speciesKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_change$old)]
+user$User_GBIF[!is.na(user$User_species)& is.na(user$User_rank)] <- user$User_species[!is.na(user$User_species)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_species) & is.na(user$User_rank)] <- "species"
+# Assign genus
+user$User_genus <- gbif_change$genus[match(user$User_original,gbif_change$old)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_change$genusKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_change$old)]
+user$User_GBIF[!is.na(user$User_genus)& is.na(user$User_rank)] <- user$User_genus[!is.na(user$User_genus)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_genus) & is.na(user$User_rank)] <- "genus"
+# Assign family
+user$User_family <- gbif_change$family[match(user$User_original,gbif_change$old)]
+user$User_GBIF_ID[is.na(user$User_GBIF_ID)] <- gbif_change$familyKey[match(user$User_original[is.na(user$User_GBIF_ID)] , gbif_change$old)]
+user$User_GBIF[!is.na(user$User_family)& is.na(user$User_rank)] <- user$User_family[!is.na(user$User_family)& is.na(user$User_rank)]
+user$User_rank[!is.na(user$User_family) & is.na(user$User_rank)] <- "family"
+# Assign final names
+user$User_GBIF_accepted_name <- gbif_change$scientificName[match(user$User_original, gbif_change$old)]
+user$validated[!is.na(user$User_GBIF)] <- T
+
+# Assign
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+
+
+# Last ones totally manually
+user <- user_save[is.na(user_save$validated),] 
+change <- data.frame(old = user$User_original, 
+                     subspecies = c("Salix cinerea cinerea","Symphytum officinale officinale" , "Acanthus mollis mollis", NA, NA),
+                     species = c("Salix cinerea","Symphytum officinale", "Acanthus mollis", "Vaccinium angustifolium x corymbosum", "Hedlundia intermedia"),
+                     genus = c("Salix", "Symphytum", "Acanthus", "Vaccinium","Hedlundia"),
+                     family = c("Salicaceae", "Boraginaceae", "Acanthaceae", "Ericaceae", "Rosaceae"),
+                     accepted = c("Salix cinerea subsp. cinerea", "Symphytum officinale subsp. officinale", "Acanthus mollis subsp. mollis", NA,
+                                  "Hedlundia intermedia (Ehrh.) Mosyakin, Fedor. & McNeill"),
+                     rank = c("subspecies","subspecies", "subspecies", "hybrid", "species"))
+
+# Assign
+user$User_subspecies <- change$subspecies
+user$User_species <- change$species
+user$User_genus <- change$genus
+user$User_family <- change$ family
+user$User_rank <- change$rank
+user$User_GBIF_accepted_name <- change$accepted
+user$User_GBIF <- change$subspecies
+user$User_GBIF[is.na(user$User_GBIF)] <- change$species[is.na(user$User_GBIF)]
+user$validated <- T
+
+# Assign
+user_save[is.na(user_save$validated),] <- user[, 1:10]
+sum(is.na(user_save$validated))
+```
+
+
+
+## 4.4 Check
+### Duplicates
+```{r}
+# Data
+user <- user_save
+
+########user_save######
+# Duplicates in family
+dup <- user |> group_by(User_genus, User_family) |> summarise(n = n())
+dup <- dup[duplicated(dup$User_genus) | duplicated(dup$User_genus, fromLast = T),]
+dup <- dup[!is.na(dup$User_genus),]
+# Assign
+user$User_family[user$User_genus %in% dup$User_genus] <- "Araliaceae"
+
+
+#######
+# Duplicates in genus
+dup <- user |> group_by(User_species, User_genus, User_family) |> summarise(n = n())
+dup <- dup[duplicated(dup$User_species) | duplicated(dup$User_species, fromLast = T),]
+# These are all NA species so correct
+
+#######
+# Duplicates in species
+dup <-  user |> group_by(User_subspecies, User_species, User_genus, User_family) |> summarise(n = n())
+dup <- dup[duplicated(dup$User_subspecies) | duplicated(dup$User_subspecies, fromLast = T),]
+dup <- dup[!is.na(dup$User_subspecies),]
+# These are all correct!
+
+
+
+#######
+# Duplicates in rank
+dup <- user |> group_by(User_rank, User_subspecies, User_species, User_genus, User_family, User_GBIF) |> summarise(n = n())
+dup <- dup[duplicated(dup$User_GBIF) | duplicated(dup$User_GBIF, fromLast = T),]
+# These look correct
+```
+
+
+### Missing
+```{r}
+# Some data was missing
+user$User_family[user$User_original %in% "Micrasterias decemdentata"] <- "Desmidiaceae"
+
+# Missing accepted names
+mis <- user[is.na(user$User_GBIF_accepted_name),]
+# Fine, this one could not be found
+
+# Missing IDs
+mis <- user[is.na(user$User_GBIF_ID),]
+# Fine, this one could not be found using the function
+
+# Missing genera
+mis <- user[is.na(user$User_genus),]
+
+# Missing ranks
+mis <- user[is.na(user$User_ranks),]
+```
+
+
+### Ranks Original
+```{r}
+# We will subdivide between the original data and the final data
+user$User_original_rank <- NA
+user$User_original_rank[grepl("(cultivar)", user$User_original)] <- "cultivar"
+user$User_original_rank[grepl("'[^']+'", user$User_original)] <- "cultivar"
+user$User_original_rank[grepl("auct. hort", user$User_original)] <- "cultivar"
+# Sector
+user$User_original_rank[grepl("sect.", user$User_original)& is.na(user$User_original_rank)] <- "sector"
+user$User_original_rank[grepl("subsect.", user$User_original)& is.na(user$User_original_rank)] <- "subsector"
+# Form
+user$User_original_rank[grepl("f\\.", user$User_original)& is.na(user$User_original_rank)] <- "form"
+# Aggregates
+user$User_original_rank[grepl("\\+", user$User_original)& is.na(user$User_original_rank)] <- "aggregate"
+user$User_original_rank[grepl("gr\\.", user$User_original)& is.na(user$User_original_rank)] <- "aggregate"
+user$User_original_rank[grepl(" group", user$User_original)& is.na(user$User_original_rank)] <- "aggregate"
+user$User_original_rank[grepl("agg\\.", user$User_original)& is.na(user$User_original_rank)] <- "aggregate"
+# Uncertain
+user$User_original_rank[grepl("s\\.l\\.", user$User_original)& is.na(user$User_original_rank)] <- "uncertain"
+user$User_original_rank[grepl("s\\.s\\.", user$User_original)& is.na(user$User_original_rank)] <- "uncertain"
+# Hybrid
+user$User_original_rank[grepl(" x ", user$User_original) & is.na(user$User_original_rank)] <- "hybrid"
+# Genus
+user$User_original_rank[grepl("subg\\.", user$User_original) & is.na(user$User_original_rank)] <- "subgenus"
+user$User_original_rank[grepl("spec\\.", user$User_original) & is.na(user$User_original_rank)] <- "genus"
+# Subspecies
+user$User_original_rank[grepl("subsp\\.", user$User_original) & is.na(user$User_original_rank)] <- "subspecies"
+# Variety
+user$User_original_rank[grepl("var\\.", user$User_original)] <- "variety"
+# family, subfamily (and one genus)
+user$User_original_rank[grepl("indet\\.", user$User_original)] <- user$User_rank[grepl("indet\\.", user$User_original)]
+# All remaining are species
+user$User_original_rank[is.na(user$User_original_rank)] <- "species"
+# the tribes were assigned incorrectly
+user$User_original_rank[user$User_rank %in% "tribe"] <- "tribe"
+user$User_original_rank[user$User_rank %in% "family" & user$User_original_rank %in% "genus"] <- "family"
+```
+
+
+### Ranks GBIF
+```{r}
+# We will subdivide between the original data and the final data
+user$User_gbif_rank <- NA
+# Form
+user$User_gbif_rank[grepl(" f\\.", user$User_GBIF_accepted_name)& is.na(user$User_gbif_rank)] <- "form"
+# Hybrid
+user$User_gbif_rank[grepl(" x ", user$User_GBIF_accepted_name) & is.na(user$User_gbif_rank)] <- "hybrid"
+user$User_gbif_rank[grepl("×", user$User_GBIF_accepted_name) & is.na(user$User_gbif_rank)] <- "hybrid"
+user$User_gbif_rank[grepl(" x ", user$User_GBIF) & is.na(user$User_gbif_rank)] <- "hybrid"
+# Subspecies
+user$User_gbif_rank[grepl("subsp\\.", user$User_GBIF_accepted_name) & is.na(user$User_gbif_rank)] <- "subspecies"
+# Variety
+user$User_gbif_rank[grepl("var\\.", user$User_GBIF_accepted_name)] <- "variety"
+# Assign the family, subfamily data
+user$User_gbif_rank[grepl("indet\\.", user$User_original)] <-  user$User_rank[grepl("indet\\.", user$User_original)]
+
+# Check subspecies
+# One species is incorrect
+user$User_subspecies[user$User_original %in% "Clinopodium calamintha subsp. spruneri"] <- NA
+user$User_species[user$User_original %in% "Clinopodium calamintha subsp. spruneri"] <-  "Clinopodium nepeta"
+user$User_GBIF[user$User_original %in% "Clinopodium calamintha subsp. spruneri"] <-  "Clinopodium nepeta"
+user$User_GBIF_ID[user$User_original %in% "Clinopodium calamintha subsp. spruneri"] <-  8916040
+user$User_GBIF[user$User_original %in% "Clinopodium calamintha subsp. spruneri"] <-  "Clinopodium calamintha (L.) Kuntze"
+
+#Assign species
+user$User_gbif_rank[!is.na(user$User_species) & is.na(user$User_gbif_rank)] <- "species"
+# Assign genus
+user$User_gbif_rank[!is.na(user$User_genus) & is.na(user$User_gbif_rank)] <- "genus"
+# Remaining are correct
+user$User_gbif_rank[is.na(user$User_gbif_rank)] <- user$User_rank[is.na(user$User_gbif_rank)]
+
+# Assign
+user$User_rank <- user$User_gbif_rank
+user <- user[, c(1:9, 11)]
+```
+
+
+### Errors
+```{r}
+#####
+# Taraxacum sect. Hamata
+# Change in user data
+user$User_genus[user$User_original %in% "Taraxacum sect. Hamata"] <- "Taraxacum"
+user$User_GBIF[user$User_original %in% "Taraxacum sect. Hamata"] <- "Taraxacum"
+user$User_family[user$User_original %in% "Taraxacum sect. Hamata"] <- "Asteraceae"
+user$User_GBIF_accepted_name[user$User_original %in% "Taraxacum sect. Hamata"] <- "Taraxacum Weber"
+user$User_GBIF_ID[user$User_original %in% "Taraxacum sect. Hamata"] <- 7787708
+
+
+#####
+# Taraxacum sect. Scariosa
+# Change in user data
+user$User_genus[user$User_original %in% "Taraxacum sect. Scariosa"] <- "Taraxacum"
+user$User_GBIF[user$User_original %in% "Taraxacum sect. Scariosa"] <- "Taraxacum"
+user$User_family[user$User_original %in% "Taraxacum sect. Scariosa"] <- "Asteraceae"
+user$User_GBIF_accepted_name[user$User_original %in% "Taraxacum sect. Scariosa"] <- "Taraxacum Weber"
+user$User_GBIF_ID[user$User_original %in% "Taraxacum sect. Scariosa"] <- 7787708
+
+#####
+# Ranunculus ficaria
+# Change in user data
+user$User_subspecies[user$User_original %in% "Ranunculus ficaria"] <- "Ficaria verna verna"
+user$User_species[user$User_original %in% "Ranunculus ficaria"] <- "Ficaria verna"
+user$User_genus[user$User_original %in% "Ranunculus ficaria"] <- "Ficaria verna"
+user$User_GBIF[user$User_original %in% "Ranunculus ficaria"] <- "Ficaria verna verna"
+user$User_GBIF_accepted_name[user$User_original %in% "Ranunculus ficaria"] <- "Ficaria verna subsp. verna"
+user$User_GBIF_ID[user$User_original %in% "Ranunculus ficaria"] <- 7277276
+user$User_rank[user$User_original %in% "Ranunculus ficaria"] <- "subspecies"
+```
+
+
+
+
+
+
+```{r}
+# Save
+#write_csv(user, "../Extra/Intermediate/User_names_cleaning_newest_newest.csv")
+```
+
+
+
+## 4.5 Save
+```{r}
+# Assign again
+all_data$User_subspecies <- user$User_subspecies[match(all_data$User_original, user$User_original)]
+all_data$User_species <- user$User_species[match(all_data$User_original, user$User_original)]
+all_data$User_genus <- user$User_genus[match(all_data$User_original, user$User_original)]
+all_data$User_family <- user$User_family[match(all_data$User_original, user$User_original)]
+all_data$Plant_user <- user$User_GBIF[match(all_data$User_original, user$User_original)]
+all_data$User_rank <- user$User_rank[match(all_data$User_original, user$User_original)]
+all_data$User_GBIF_accepted_name <- user$User_GBIF_accepted_name[match(all_data$User_original, user$User_original)]
+all_data$User_GBIF_ID <- user$User_GBIF_ID[match(all_data$User_original, user$User_original)]
+all_data$User_original_rank <- user$User_original_rank[match(all_data$User_original, user$User_original)]
+
+#write_csv(all_data, "../Results/Bees_all_observations.csv")
+```
+
+
+# FINAL
+## 5.1 Load
+```{r}
+# Original dataset
+pol <- read.csv("../Data/Observation/observation_org_bees.csv")
+nat <- read_csv("../Results/iNaturalist_bees_all.csv", show_col_types = FALSE)
+
+# Identifications
+pol_plantnet <- read.csv("../Results/Plantnet_identification.csv")
+pol_plantnet_iNat <- read.csv("../Results/Plantnet_identification_iNat_all.csv")
+```
+
+
+Combine identifications
+```{r}
+# Make character
+pol_plantnet$ID <- as.character(pol_plantnet$ID)
+pol_plantnet <- bind_rows(pol_plantnet, pol_plantnet_iNat)
+```
+
+
+Combine observations
+```{r}
+## OBSERVATION.ORG ##
+# Reduce dataset with relevant columns
+pol_data <- pol |> dplyr::select(id, date, time, lat, lng, accuracy, euromed_region, validation.status,
+                                 scientific.name, family, species.type, number, sex, life.stage, activity,
+                                 related.species, link)
+
+# Add source platform
+pol_data$source <- "Observation.org"
+pol_data <- pol_data |> relocate(source, .before = id)
+
+# Change names for now
+colnames(pol_data) <- c("Platform","Obs_ID","Date","Time","Latitude","Longitude","Coordinate_uncertainty","Euro+Med_region","Observation_quality",
+                        "Pol_original","Pol_family_original","Pol_rank_original","Number","Sex","Life_stage","Activity",
+                        "User_original","Link")
+
+# Change ID
+pol_data$Obs_ID <- as.character(pol_data$Obs_ID)
+
+
+## iNATURALIST ##
+# Assign the link
+nat$link <- paste("https://www.inaturalist.org/observations/", nat$observation_uuid, sep= "")
+
+# Get relevant columns
+nat_data <- nat |> dplyr::select(observation_uuid, observed_on,  latitude, longitude,positional_accuracy, Country, quality_grade, anomaly_score, 
+                                 name, family_inat, link)
+
+# Assign source
+nat_data$source <- "iNaturalist.org"
+nat_data <- nat_data |> relocate(source, .before = observation_uuid)
+
+colnames(nat_data) <- c("Platform","Obs_ID","Date", "Latitude","Longitude","Coordinate_uncertainty","Euro+Med_region","Observation_quality", "Anomaly_score",
+                        "Pol_original","Pol_original_family", "Link")
+
+
+## COMBINE ##
+# Make sure date corresponds
+pol_data$Date <- as.Date(pol_data$Date, format = "%Y-%m-%d")
+nat_data$Date <- as.Date(nat_data$Date, format = "%Y-%m-%d")
+
+# Combine
+all_data <- bind_rows(pol_data, nat_data)
+```
+
+
+## 5.2 Bee
+```{r}
+# Get bee names
+bee_names <- read_csv("../Results/Bee_name_all_last_version.csv", show_col_types = FALSE)
+
+# Assign
+all_data$Bee_accepted_name <- bee_names$bee_name[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_accepted_scientific_name <- bee_names$bee_name_scientific[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_subspecies <- bee_names$subspecies[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_species <- bee_names$species[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_genus <- bee_names$genus[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_family <- bee_names$family[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_GBIF_key <- bee_names$key[match(all_data$Pol_original, bee_names$old_name)]
+all_data$Bee_rank <- bee_names$rank[match(all_data$Pol_original, bee_names$old_name)]
+```
+
+
+
+
+## 5.3 Plantnet
+```{r}
+# Get plantnet names
+names_plantnet <- read_csv("../Extra/Intermediate/Plantnet_names_cleaning_newest_newest.csv", show_col_types = FALSE)
+
+# Assign
+pol_plantnet$GBIF_subspecies <- names_plantnet$GBIF_subspecies[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_species <- names_plantnet$GBIF_species[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_genus <- names_plantnet$GBIF_genus[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_family <- names_plantnet$GBIF_family[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_ID_final<- names_plantnet$GBIF_ID[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_accepted_name <- names_plantnet$GBIF_accepted[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_name <- names_plantnet$GBIF[match(pol_plantnet$Name, names_plantnet$Name)]
+pol_plantnet$GBIF_rank <- names_plantnet$GBIF_rank[match(pol_plantnet$Name, names_plantnet$Name)]
+```
+
+
+```{r}
+# We will assign to the original database
+all_data$Plantnet_subspecies <- pol_plantnet$GBIF_subspecies[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_species <- pol_plantnet$GBIF_species[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_genus <- pol_plantnet$GBIF_genus[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_family <- pol_plantnet$GBIF_family[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plant_plantnet <- pol_plantnet$GBIF_name[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_rank <- pol_plantnet$GBIF_rank[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_GBIF_ID <- pol_plantnet$GBIF_ID_final[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_GBIF_accepted_name <- pol_plantnet$GBIF_accepted_name[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_organ <- pol_plantnet$Organ[match(all_data$Obs_ID, pol_plantnet$ID)]
+all_data$Plantnet_score <- pol_plantnet$Score[match(all_data$Obs_ID, pol_plantnet$ID)]
+```
+
+
+## 5.4 User
+```{r}
+# Save
+user <- read_csv("../Extra/Intermediate/User_names_cleaning_newest_newest.csv")
+
+# Assign again
+all_data$User_subspecies <- user$User_subspecies[match(all_data$User_original, user$User_original)]
+all_data$User_species <- user$User_species[match(all_data$User_original, user$User_original)]
+all_data$User_genus <- user$User_genus[match(all_data$User_original, user$User_original)]
+all_data$User_family <- user$User_family[match(all_data$User_original, user$User_original)]
+all_data$Plant_user <- user$User_GBIF[match(all_data$User_original, user$User_original)]
+all_data$User_rank <- user$User_rank[match(all_data$User_original, user$User_original)]
+all_data$User_GBIF_accepted_name <- user$User_GBIF_accepted_name[match(all_data$User_original, user$User_original)]
+all_data$User_GBIF_ID <- user$User_GBIF_ID[match(all_data$User_original, user$User_original)]
+all_data$User_original_rank <- user$User_original_rank[match(all_data$User_original, user$User_original)]
+```
+
+
+
+## 5.5 Errors
+### Bees
+```{r}
+# Read data
+# Check Vesitohalictus
+check <- all_data[all_data$Bee_accepted_name %in% "Vestitohalictus",]
+check$Bee_genus <- "Halictus"
+check$Bee_rank <- "subgenus"
+all_data[all_data$Bee_accepted_name %in% "Vestitohalictus",]  <- check
+
+# Paramegilla
+check <- all_data[all_data$Bee_accepted_name %in% "Paramegilla",]
+check$Bee_genus <- "Anthophora"
+all_data[all_data$Bee_accepted_name %in% "Paramegilla",]  <- check
+
+# Dialictus
+check <- all_data[all_data$Bee_accepted_name %in% "Dialictus",]
+check$Bee_genus <- "Lasioglossum"
+check$Bee_rank <- "subgenus"
+all_data[all_data$Bee_accepted_name %in% "Dialictus",]  <- check
+
+# Monilapis 
+check <- all_data[all_data$Bee_accepted_name %in% "Monilapis",]
+check$Bee_genus <- "Halictus"
+check$Bee_family <- "Halictidae"
+check$Bee_rank <- "subgenus"
+all_data[all_data$Bee_accepted_name %in% "Monilapis",]  <- check
+
+# Evylaeus
+check <- all_data[all_data$Bee_accepted_name %in% "Evylaeus",]
+check$Bee_genus <- "Lasioglossum"
+check$Bee_rank <- "subgenus"
+all_data[all_data$Bee_accepted_name %in% "Evylaeus",]  <- check
+
+# Rhophitoides
+check <- all_data[all_data$Bee_accepted_name %in% "Rhophitoides",]
+check$Bee_genus <- "Rophites"
+check$Bee_rank <- "subgenus"
+all_data[all_data$Bee_accepted_name %in% "Rhophitoides",]  <- check
+
+# Cubitalia
+check <- all_data[all_data$Bee_accepted_name %in% "Cubitalia",]
+check$Bee_genus <- "Eucera"
+check$Bee_rank <- "subgenus"
+all_data[all_data$Bee_accepted_name %in% "Cubitalia",]  <- check
+
+
+# Bombus vestalis perezi
+check <- all_data[all_data$Pol_original %in% "Bombus vestalis perezi",]
+check$Bee_subspecies <- "Bombus vestalis perezi"
+check$Bee_species <- "Bombus vestalis"
+check$Bee_accepted_name <- "Bombus vestalis perezi"
+check$Bee_accepted_scientific_name <- "Bombus vestalis perezi (Schulthess-Rechberg, 1886)"
+check$Bee_GBIF_key <- 12269257
+check$Bee_rank <- "subspecies"
+all_data[all_data$Pol_original %in% "Bombus vestalis perezi",]  <- check
+
+
+# We did not assign Anthophila but also did not remove them
+all_data <- all_data[!all_data$Pol_original %in% "Anthophila",]
+all_data <- all_data[!all_data$Pol_original %in% "Sphecodina",]
+```
+
+
+```{r}
+# Change some subspecies that are actually species
+change <- data.frame(old =  c("Bombus vestalis perezi", "Bombus pascuorum smithianus", "Bombus monticola rondoui", "Bombus pascuorum mniorum", 
+                               "Bombus pascuorum melleofacies", "Bombus schrencki schrencki"),
+                     new = c("Bombus perezi (Schulthess, 1886)","Bombus pascuorum (Scopoli, 1763)", "Bombus monticola Smith, 1849", "Bombus pascuorum (Scopoli, 1763)",
+                             "Bombus pascuorum (Scopoli, 1763)", "Bombus schrencki Morawitz, 1881"),
+                     key = c(1340375, 340405,1340341,1340405,1340405,1340313))
+
+# Change these
+check <- all_data[all_data$Pol_original %in% change$old,]
+check$Bee_subspecies <- NA
+check$Bee_rank <- "species"
+check$Bee_accepted_scientific_name <- change$new[match(check$Pol_original, change$old)]
+check$Bee_accepted_name <- check$Bee_species
+all_data[all_data$Pol_original %in% change$old,] <- check
+```
+
+
+### Plantnet
+```{r}
+change <- data.frame(old = c("Alchemilla arvensis", "Gladiolus hortulanus", "Iris hybrida", "Phoebanthus grandiflorus", "Rubus uncinellus", "Tradescantia andersoniana"),
+                     new=  c("Aphanes arvensis L.", "Gladiolus × gandavensis Van Houtte","Iris × germanica L.","Phoebanthus grandiflora (Torr. & A.Gray) S.F.Blake",
+                             "Rubus acheruntinus (Ten.) Ten.", "Tradescantia virginiana L."),
+                     spec = c("Aphanes arvensis", "Gladiolus gandavensis", "Iris germanica", "Phoebanthus grandiflora", "Rubus acheruntinus", "Tradescantia virginiana"),
+                     key = c(5365013, 3586105,5298069, 3098664,2993408,2765272))
+change$gen <- word(change$spec, 1)
+
+# Change these
+check <- all_data[all_data$Plant_plantnet %in% change$old,]
+check$Plantnet_subspecies <- NA
+check$Plantnet_species <- change$spec[match(check$Plant_plantnet, change$old)]
+check$Plantnet_GBIF_ID <- change$key[match(check$Plant_plantnet, change$old)]
+check$Plantnet_genus <- change$gen[match(check$Plant_plantnet, change$old)]
+check$Plantnet_GBIF_accepted_name <- change$new[match(check$Plant_plantnet, change$old)]
+check$Plant_plantnet <- change$spec[match(check$Plant_plantnet, change$old)]
+all_data[all_data$Plant_plantnet %in% change$old,] <- check
+```
+
+
+### User
+```{r}
+change <- data.frame(old = c("Lamium purpureum + Lamium hybridum", "Lotus corniculatus var. corniculatus + Lotus corniculatus var. sativus", "Salix aurita + Salix cinerea",
+                             "Medicago falcata + Medicago sativa"," Malva alcea + Malva moschata", "Lotus corniculatus + Lotus glaber","Calamintha spec.",
+                             "Vicia sativa subsp. angustifolia + Vicia sativa subsp. segetalis","Phleum nodosum + Phleum pratense","Cardaminopsis spec.",
+                             "Fragaria vesca + Fragaria moschata","Centaurea bella", "Salix udensis 'Sekka' x Salix viminalis", "Dorotheanthus spec.",
+                             "Malva moschata"),
+                     new = c("Lamium L.", "Lotus corniculatus L.", "Salix L.", "Medicago L.", "Malva L.", "Lotus L." , "Clinopodium L.","Vicia sativa L.", "Phleum L.",
+                             "Arabidopsis Heynh.", "Fragaria L.", "Psephellus bellus (Trautv.) Wagenitz", "Salix L.", "Cleretum N.E.Br.", "Malva L."),
+                     rank = c("genus", "species", "genus", "genus", "genus", "genus", "genus", "species", "genus", "genus", "genus", "species", "genus", "genus", "genus"),
+                     key = c(2926678,5357013, 3039576, 2965200, 3152364,10220564 ,2926907,2975014,2706001,3052435,3029779,3137947,3039576,7329475, 3152364))
+change$gen <- word(change$new, 1)
+change$spec <- NA
+change$spec[change$rank %in% "species"] <- word(change$new[change$rank %in% "species"], 1,2)
+change$final <- change$spec
+change$final[is.na(change$final)] <- change$gen[is.na(change$final)] 
+  
+# Change these
+check <- all_data[all_data$User_original %in% change$old,]
+check$User_subspecies <- NA
+check$User_species <- change$spec[match(check$User_original, change$old)]
+check$User_GBIF_ID <- change$key[match(check$User_original, change$old)]
+check$User_genus <- change$gen[match(check$User_original, change$old)]
+check$User_GBIF_accepted_name <- change$new[match(check$User_original, change$old)]
+check$Plant_user <- change$final[match(check$User_original, change$old)]
+check$User_rank <- change$rank[match(check$User_original, change$old)]
+all_data[all_data$User_original %in% change$old,] <- check
+```
+
+
+
+
+## 5.6 Consensus
+```{r}
+# Make rank lower
+all_data$User_rank <- tolower(all_data$User_rank)
+all_data$Bee_rank <- tolower(all_data$Bee_rank)
+all_data$Plantnet_rank <- tolower(all_data$Plantnet_rank)
+all_data$User_original_rank <- tolower(all_data$User_original_rank)
+
+# Get the final name
+all_data$Plant_name <- all_data$Plant_user
+all_data$Plant_rank <- all_data$User_rank
+all_data$Plant_subspecies <- all_data$User_subspecies
+all_data$Plant_species <- all_data$User_species
+all_data$Plant_genus <- all_data$User_genus
+all_data$Plant_family <- all_data$User_family
+all_data$Plant_GBIF_ID <- all_data$User_GBIF_ID
+all_data$Plant_GBIF_accepted_name <- all_data$User_GBIF_accepted_name
+all_data$Plant_name_source <- NA
+all_data$Plant_name_source[!is.na(all_data$Plant_name)] <- "User"
+
+# The ones that are missing get the plantnet identity
+all_data$Plant_name[is.na(all_data$Plant_rank)] <- all_data$Plant_plantnet[is.na(all_data$Plant_rank)] 
+all_data$Plant_subspecies[is.na(all_data$Plant_rank)] <- all_data$Plantnet_subspecies[is.na(all_data$Plant_rank) ] 
+all_data$Plant_species[is.na(all_data$Plant_rank)] <- all_data$Plantnet_species[is.na(all_data$Plant_rank) ] 
+all_data$Plant_genus[is.na(all_data$Plant_rank)] <- all_data$Plantnet_genus[is.na(all_data$Plant_rank) ] 
+all_data$Plant_family[is.na(all_data$Plant_rank)] <- all_data$Plantnet_family[is.na(all_data$Plant_rank) ] 
+all_data$Plant_rank[is.na(all_data$Plant_rank)] <- all_data$Plantnet_rank[is.na(all_data$Plant_rank) ] 
+all_data$Plant_GBIF_ID[is.na(all_data$Plant_GBIF_ID)] <- all_data$Plantnet_GBIF_ID[is.na(all_data$Plant_GBIF_ID) ] 
+all_data$Plant_GBIF_accepted_name[is.na(all_data$Plant_GBIF_accepted_name)] <- all_data$Plantnet_GBIF_accepted_name[is.na(all_data$Plant_GBIF_accepted_name) ] 
+all_data$Plant_name_source[!is.na(all_data$Plant_name) & is.na(all_data$Plant_name_source)] <- "Plantnet"
+```
+
+
+```{r}
+# We assign plant level identification if genus is the same
+# Only if it has a plantnet species or subspecies name this is relevant, otherwise it would just be the same as the user provided name
+check <- all_data[is.na(all_data$Plant_species) & !is.na(all_data$Plant_genus) & !is.na(all_data$Plantnet_species),]
+# If the genus is the same, we will assign the plantnet name (31995)
+check <- check[check$User_genus == check$Plantnet_genus,]
+# We will assign the official name, so start from subspecies level on (191)
+sum(!is.na(check$Plantnet_subspecies))
+
+# Assign to the Plantnet name
+all_data$Plant_name[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plant_plantnet[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_rank[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_rank[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_subspecies[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_subspecies[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_species[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_species[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_GBIF_accepted_name[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_GBIF_accepted_name[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_GBIF_ID[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_GBIF_ID[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_name_source[all_data$Obs_ID %in% check$Obs_ID] <- "Plantnet"
+
+
+# We do the same if the family levels overlap
+# Here there must be at least a genus identification from plantnet
+check <- all_data[is.na(all_data$Plant_species) & is.na(all_data$Plant_genus)  & !is.na(all_data$Plant_family) & !is.na(all_data$Plantnet_genus),]
+# These are only 807 observations of which 643 correspond
+check <- check[check$User_family == check$Plantnet_family,]
+sum(!is.na(check$Plantnet_subspecies))
+
+# Assign to the Plantnet name
+all_data$Plant_name[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plant_plantnet[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_rank[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_rank[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_subspecies[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_subspecies[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_species[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_species[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_genus[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_genus[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_GBIF_accepted_name[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_GBIF_accepted_name[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_GBIF_ID[all_data$Obs_ID %in% check$Obs_ID] <- all_data$Plantnet_GBIF_ID[all_data$Obs_ID %in% check$Obs_ID]
+all_data$Plant_name_source[all_data$Obs_ID %in% check$Obs_ID] <- "Plantnet"
+```
+
+
+
+## 5.7 Save
+```{r}
+#all_data <- read_csv( "../Results/Bees_all_observations.csv")
+write_csv(all_data, "../Results/Bees_all_observations.csv")
+```
+
