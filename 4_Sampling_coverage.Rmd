@@ -1,0 +1,363 @@
+---
+title: "Coverage"
+author: "Willem Goossens"
+date: "2026-09-23"
+output: html_document
+---
+---
+title: "Sampling coverage"
+author: "Willem Goossens"
+date: "2026-05-15"
+output: html_document
+---
+
+# Load
+Empty environment
+```{r}
+#rm(list=ls())
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(iNEXT)
+library(ggpubr)
+library(parallel)
+library(furrr)
+library(future)
+library(rgbif)
+```
+
+Load data
+```{r}
+# overall dataset
+data <- read_csv("../Data/Observation/plantnet_dataset_newest_newest.csv", show_col_types = FALSE)
+```
+
+
+```{r}
+# Subset data
+data <- data[(!is.na(data$Plant_user)|(!is.na(data$Plant_plantnet) & data$Plantnet_score >=0.619 )),]
+data <- data |>  group_by(Bee_species, Plant_species) |>  filter(n() >=  1) |>  ungroup()
+data <- data[!is.na(data$Bee_species),]
+data <- data[!is.na(data$Plant_species),]
+
+# Only get insect pollinated species
+data <- data[data$Pollination_syndrome %in% c("insect"),]
+```
+
+
+# Bee
+## 2.1 iNext
+```{r}
+# Each observation is one record, plant species is the "species"
+interact_list <- data |>
+  # group by pollinator = build a curve per pollinator
+  dplyr::group_by(Bee_species) |>
+  # split per bee
+  dplyr::group_split() |>
+  # calculate for each bee species how many times it interacts with a plant
+  lapply(\(df) {
+    # frequency of each plant species (how many times is it observed)
+    x <- table(df$Plant_species) |> as.numeric()
+    names(x) <- names(table(df$Plant_species))
+    x})
+
+# Give the names of the pollinators
+names(interact_list) <- sort(unique(data$Bee_species))
+
+
+# Only take those bee species for which there were at least 2 different plant species observations present
+interact_list <- interact_list[sapply(interact_list,length ) >= 2]
+
+
+# Run on multiple cores
+if(file.exists("../Extra/Intermediate/Rarefaction_accumulation_pollinators_individual_species_newest.Rdata")){
+  RE <- read_rds( "../Extra/Intermediate/Rarefaction_accumulation_pollinators_individual_species_newest.Rdata")
+} else {
+  # interaction list
+  plan(multisession, workers = detectCores() - 2)  # works on Windows
+  RE <- future_map(interact_list, 
+                   \(x) iNEXT(list(x), q = 0, datatype = "abundance", nboot = 50),
+                   .options = furrr_options(seed = TRUE))
+  # stop the cores
+  plan(sequential)        
+  write_rds(RE, "../Extra/Intermediate/Rarefaction_accumulation_pollinators_individual_species_newest.Rdata")
+}
+```
+
+
+## 2.2 Plot
+### Data
+```{r}
+# Extract rarefaction data from each iNEXT object
+RE_df <- bind_rows( lapply(names(RE), \(pol) {RE[[pol]]$iNextEst$size_based |> dplyr::mutate(Pollinator = pol)}))
+
+# Get the estimations
+RE_df_2 <- bind_rows( lapply(names(RE), \(pol) {RE[[pol]]$AsyEst |> dplyr::mutate(Pollinator = pol) }))
+
+
+# Only take species richness --> gives also the sampling coverage
+RE_SC <- RE_df_2[RE_df_2$Diversity== "Species richness",] 
+RE_SC$coverage <- RE_SC$Observed/RE_SC$Estimator
+median(RE_SC$coverage)
+# Also 3 species less than past: Andrena ferox, Macopis frivaldszkyi, Panurgus canescens
+
+# Add to the one we are plotting
+RE_df$coverage <- RE_SC$coverage[match(RE_df$Pollinator, RE_SC$Pollinator)]
+```
+
+
+### Observed
+```{r}
+# Number of observations
+n_spec <- as.data.frame(table(data$Bee_species))
+
+# Assign number
+RE_SC$n <- n_spec$Freq[match(RE_SC$Pollinator, n_spec$Var1)]
+
+# Assign family and corresponding colours
+RE_SC$family <- data$Bee_family[match(RE_SC$Pollinator, data$Bee_species)]
+# Here link to previous colours used in the phylogenetic diversity file
+col <- c("#FFCE66", "#CB814D", "#92463A", "#572948" ,"#4D5492", "#6497CD")
+
+# Plot RE_SC
+plot_pol <- ggplot(data= RE_SC, aes(x= Observed, y= Estimator, col= family))+
+  geom_point(aes(col = family))+
+  geom_abline (slope=1, linetype = "dashed", color="Red")+
+  scale_x_log10(limits= c(1, 5000),  breaks = c(1,1*10^1, 1*10^2, 1*10^3),
+                labels= c(1,expression(10),expression(100),
+                               expression(1000)),
+                guide = "axis_logticks")+
+  scale_y_log10(limits= c(1, 5000),  breaks = c(1, 1*10^1, 1*10^2, 1*10^3),
+                labels= c(1, expression(10),expression(100),
+                               expression(1000)),
+                guide = "axis_logticks")+
+  ggpubr::theme_pubr()+
+  scale_colour_manual( values=  col, name = "Sampling coverage", guide = "none") +
+  theme(legend.position = "right")+
+  ylab("Estimated number of plants\nper bee species")+
+  xlab("Observed number of plants\nper bee species")
+
+plot_pol
+```
+
+
+
+
+
+### Coverage
+```{r}
+# Correct model with quadratic term
+mod <- lm(coverage ~ poly(log10(n), 2), RE_SC)
+summary(mod)
+# Check model
+DHARMa::plotSimulatedResiduals(mod)
+
+
+# plot
+plot_Bee_n <- ggplot(RE_SC, aes(x = (n), y = coverage)) +
+  geom_point(alpha = 0.8, aes(colour = family)) +
+  stat_smooth(method = "lm", 
+              formula = y ~ poly(x, 2),  
+              se = TRUE, col = "red") +
+  labs(x = "log10(pollinator observations)", y = "Sampling coverage")  +
+  scale_colour_manual( values=  col, name = "Sampling coverage",  guide = "none") +
+  scale_fill_manual( values = col, name = "Sampling coverage", guide = "none") +  
+  ggpubr::theme_pubr() +
+  theme(legend.position="bottom")+
+  scale_x_log10(breaks = c(1*10^1, 1*10^3, 1*10^5),
+                labels= c(expression(10), expression(10^3), expression(10^5)),
+                guide = "axis_logticks")+
+  theme(legend.position = "none")+
+  xlab("Number of bee observations")+
+  ylab("Bee sampling coverage")
+plot_Bee_n
+
+RE_SC_bees <- RE_SC
+RE_SC <- RE_SC_bees
+```
+
+
+```{r}
+# Check number of genera
+RE_SC$gen <- vegdata::parse.taxa(RE_SC$Pollinator)[[2]]
+# tax_genus$Bee_genus[!tax_genus$Bee_genus %in% RE_SC$gen]
+# Two genera are not represented here now
+```
+
+
+
+# Plant
+## 3.1 iNext
+```{r}
+# Each observation is one record, plant species is the "species"
+interact_list <- data |>
+  # group by plant species
+  dplyr::group_by(Plant_species) |>
+  # split each group
+  dplyr::group_split() |>
+  lapply(\(df) {
+    # frequency of each plant species = how many times observed
+    x <- table(df$Bee_species) |> as.numeric()
+    names(x) <- names(table(df$Bee_species))
+    x
+  })
+
+# give the names of the pollinators
+names(interact_list) <- sort(unique(data$Plant_species))
+
+# only take those for which there were at least 5 observations present
+interact_list <- interact_list[sapply(interact_list, sum) >= 5]
+
+# load data to run it in parralel
+if(file.exists("../Extra/Intermediate/Rarefaction_accumulation_plant_individual_species_newest.Rdata")){
+  RE <- read_rds( "../Extra/Intermediate/Rarefaction_accumulation_plant_individual_species_newest.Rdata")
+} else {
+  # run on multiple cores
+  plan(multisession, workers = detectCores() - 2)  # works on Windows
+  RE <- future_map(interact_list, 
+                   \(x) iNEXT(list(x), q = 0, datatype = "abundance", nboot = 50),
+                   .options = furrr_options(seed = TRUE))
+  # stop the cores
+  plan(sequential)        
+  write_rds(RE, "../Extra/Intermediate/Rarefaction_accumulation_plant_individual_species_newest.Rdata")
+}
+```
+
+
+## 3.2 Plot
+### Data
+```{r}
+# Extract rarefaction data from each iNEXT object
+RE_df <- bind_rows(lapply(names(RE), \(pol) { RE[[pol]]$iNextEst$size_based |> dplyr::mutate(Plant = pol) }))
+
+# Extract estimates and coverage
+RE_df_2 <- bind_rows(lapply(names(RE), \(pol) { RE[[pol]]$AsyEst |> dplyr::mutate(Plant = pol)}))
+RE_SC <- RE_df_2[RE_df_2$Diversity== "Species richness",] 
+RE_SC$coverage <- RE_SC$Observed/RE_SC$Estimator
+
+# Assign to the original dataset
+RE_df$coverage <- RE_SC$coverage[match(RE_df$Plant, RE_SC$Plant)]
+median(RE_SC$coverage)
+```
+
+### Order
+```{r}
+# create database
+gbif <- name_backbone_checklist(RE_SC$Plant[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(RE_SC$Plant)/10*(i-1))
+  end <- floor(length(RE_SC$Plant)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(RE_SC$Plant[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+
+# assign the classes
+RE_SC$class <- gbif$class[match(RE_SC$Plant, gbif$verbatim_name)]
+RE_SC$order <- gbif$order[match(RE_SC$Plant, gbif$verbatim_name)]
+
+RE_SC$order[RE_SC$Plant %in% "Salix alba"] <- "Malpighiales"
+RE_SC$order[RE_SC$Plant %in% "Iris orientalis"] <- "Asparagales"
+```
+
+
+### Observed
+```{r}
+# Get number
+n_spec <- as.data.frame(table(data$Plant_species))
+RE_SC$n <- n_spec$Freq[match(RE_SC$Plant, n_spec$Var1)]
+
+# Assign genus again, RE_df misses some species
+gen <- RE_SC[!duplicated(RE_SC$Plant),]
+gen <- gen |> group_by(order) |> mutate(n =n())
+# Only give colour to those that contain at least 100 species
+gen$order <- ifelse(gen$n < 100, "Other", gen$order)
+RE_SC$order <- gen$order[match(RE_SC$Plant, gen$Plant)]
+ordered_levels <- c( "Other", "Alismatales", "Liliales", "Asparagales", "Zingiberales", "Ranunculales","Saxifragales","Malpighiales", "Rosales", "Myrtales", 
+                     "Sapindales", "Malvales", "Brassicales", "Caryophyllales", "Ericales", "Asterales", "Apiales", "Gentianales", "Lamiales"   )
+RE_SC$order <- factor(RE_SC$order, levels = c(ordered_levels))
+
+# Keep only orders present in RE_SC, in the original order, with Other last
+levels_here <- c(ordered_levels[ordered_levels %in% RE_SC$order])
+
+RE_SC$order <- factor(RE_SC$order, levels = levels_here)
+RE_SC$order[is.na(RE_SC$order)] <- "Other"
+
+# Set colours 
+cols_order <- c("Other"  = "#723957", "Alismatales" = "#7B3846","Liliales" = "#853E38", "Asparagales" = "#904A2F",  "Zingiberales"= "#9B5D2B","Ranunculales"= "#A9742E",
+                  "Saxifragales"= "#B88F3B",  "Malpighiales"= "#C8AC54","Rosales"= "#D2C776", "Myrtales"= "#D4D997","Sapindales"= "#CBE0B1","Malvales"= "#B7DEC4",
+                  "Brassicales" = "#9AD3CC","Caryophyllales"= "#7DC2CE","Ericales"= "#63ACC9","Asterales"= "#5394BF", "Apiales"= "#4D7BB2", "Gentianales"= "#53649E",
+                  "Lamiales"= "#5D4F85")
+
+# plot RE_SC
+plot_plant <- ggplot(data= RE_SC, aes(x= Observed, y= Estimator, col= order))+
+  geom_point(aes(col = order))+
+  geom_abline (slope=1, linetype = "dashed", color="Red")+
+  scale_x_log10(limits= c(1, 300),  breaks = c(1,1*10^1, 1*10^2, 1*10^3),
+                labels= c(1,expression(10),expression(100),
+                               expression(1000)),
+                guide = "axis_logticks")+
+  scale_y_log10(limits= c(1, 300),  breaks = c(1, 1*10^1, 1*10^2, 1*10^3),
+                labels= c(1, expression(10),expression(100),
+                               expression(1000)),
+                guide = "axis_logticks")+
+  ggpubr::theme_pubr()+
+  scale_colour_manual( values=  cols_order, name = "Sampling coverage",
+                       guide =  "none")+
+  theme(legend.position = "right")+
+  ylab("Estimated number of bees\nper plant species")+
+  xlab("Observed number of bees\nper plant species")
+
+cor.test(RE_SC$Observed, RE_SC$Estimator, method= "pearson")
+
+plot_plant
+```
+
+
+### Coverage
+```{r}
+# Correct model with quadratic term
+mod <- lm(coverage ~ poly(log10(n), 2), RE_SC)
+summary(mod)
+DHARMa::plotSimulatedResiduals(mod)
+
+
+# Plot
+plot_plant_n <- ggplot(RE_SC, aes(x = (n), y = coverage)) +
+  geom_point(alpha = 0.8, aes(col = order)) +
+  stat_smooth(method = "lm", 
+              formula = y ~ poly(x, 2),  se = TRUE, col = "red") +
+  labs(x = "Number of plant observations", y = "Sampling coverage")  +
+  scale_colour_manual( values=  cols_order, name = "Sampling coverage", guide = "none") +
+  scale_fill_manual( values = cols_order, name = "Sampling coverage", guide = "none") +  
+  ggpubr::theme_pubr() +
+  theme(legend.position="bottom")+
+   scale_x_log10(breaks = c(1*10^1, 10^3, 10^5),
+                labels= c(expression(10),expression(10^3), expression(10^5)),
+                guide = "axis_logticks")+
+  theme(legend.position = "none")+
+  xlab("Number of plant observations")+
+  ylab("Plant sampling coverage")
+plot_plant_n
+RE_SC_plants <- RE_SC
+RE_SC <- RE_SC_plants
+```
+
+# Merge
+```{r}
+# Get plant data
+plants <-  ggarrange(plot_plant, plot_plant_n, ncol= 2, nrow=1,  align= "hv", common.legend = F, legend="right")
+plants
+
+# Get bee data
+pol <- ggarrange(plot_pol, plot_Bee_n,  ncol= 2, nrow= 1, align= "hv", common.legend = F, legend="right")
+pol
+
+ggsave("../Images/Rarefaction_plants.png", plants, width = 9, height = 3)
+ggsave("../Images/Rarefaction_pol.png", pol, width = 9, height = 3)
+```

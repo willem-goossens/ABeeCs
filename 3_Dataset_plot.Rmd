@@ -1,0 +1,254 @@
+---
+title: "Map"
+author: "Willem Goossens"
+date: "2026-09-21"
+output: html_document
+---
+---
+title: "Plot"
+author: "Willem Goossens"
+date: "2026-06-03"
+output: html_document
+---
+
+# INTRO
+Empty environment
+```{r}
+rm(list=ls())
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(sf)
+library(sp)
+library(rnaturalearth)
+library(ggnewscale)
+library(ggpubr)
+library(marmap)
+library(giscoR)
+library(patchwork)
+```
+
+Load data
+```{r}
+# overall dataset
+data <- read_csv("../Data/Observation/plantnet_dataset_newest_newest.csv", show_col_types = FALSE)
+```
+
+
+
+# MAP
+## 1.1 Prepare
+```{r}
+# Get coordinates
+coord <- data |> dplyr::select("Obs_ID", "Country","Latitude", "Longitude")
+
+# Load world map and bathymetry data
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Define Europe bounding box
+map_bbox <- c(-25, 40, 33, 72)  
+bathy_data <- getNOAA.bathy( lon1 = map_bbox[1], lon2 = map_bbox[2], lat1 = map_bbox[3], lat2 = map_bbox[4],resolution = 5)
+ 
+# Convert bathymetry to raster
+bathy_raster <- marmap::as.raster(bathy_data)
+bathy_df <- as.data.frame(as(bathy_raster, "SpatialPixelsDataFrame"))
+colnames(bathy_df) <- c("elevation", "x", "y")
+
+# Read and transform observation points
+coord <- coord <- st_as_sf(coord, coords = c("Longitude","Latitude"), remove = FALSE) |> st_set_crs(4326) |> st_transform(4326)
+
+# Get country boundaries
+countries <- gisco_get_countries(resolution = "03", region = "Europe") |>   filter(CNTR_ID != "RU") |>  st_make_valid()
+cyprus <- gisco_get_countries(country = "CY", resolution = "03") |> st_make_valid()
+countries <- bind_rows(countries, cyprus)
+
+# Create a grid over Europe
+countries <- st_transform(countries, 4326)
+europe_bbox <- st_bbox(c(xmin = -20, xmax = 45, ymin = 30, ymax = 73), crs = 4326) |>  st_as_sfc() |> st_transform(4326)
+countries <- st_intersection(countries, europe_bbox)
+# Grid of 0.5 degree
+grid <- st_make_grid(countries, cellsize = 0.5, square = TRUE) |> st_sf() |> mutate(cell_id = row_number())
+```
+
+
+## 1.2 Number
+```{r}
+# Count points per grid cell
+coord$obs <- 1
+# Note that running this takes a very long time
+grid_counts <- st_join(grid, coord, join = st_intersects) |>  group_by(cell_id) |> summarise(n = sum(obs, na.rm = TRUE))
+
+grid_counts$n[grid_counts$n=="0"] <- NA
+grid_counts$obs_cat <- ifelse(is.na(grid_counts$n), "No data", "Data")
+grid_counts$log_n <- log10(grid_counts$n)
+
+grid_counts <- as.data.frame(st_coordinates(st_centroid(grid_counts))) |>  mutate(n = grid_counts$n)
+# Get breaks
+breaks <- c(0, 1, 10, 100,  1000,  10000, 100000)
+```
+
+
+
+
+## 1.3 Map 
+```{r}
+# Plot all data
+plot_map <- ggplot() +
+ geom_tile(data = bathy_df, aes(x = x, y = y, fill = elevation)) +
+ scale_fill_gradientn(
+   colors = c("lightblue3", "lightblue2", "lightblue1", "aliceblue"),
+    name = "Depth (m)", limits = c(-6000, 0), na.value = "aliceblue",  guide = "none") +       
+  new_scale_fill() +
+  geom_sf(data = world, fill = "antiquewhite", color = "grey", size = 0.2, alpha=0.5) +
+  # Add country borders
+  #geom_sf(data = medRegions, fill = "antiquewhite", color = "grey", size = 0.2, alpha= 0.5) +
+  # Plot occurrences
+  geom_raster(data = grid_counts, aes(X, Y, fill = n), alpha= 0.8) +
+  scale_fill_viridis_c(option = "inferno", trans= "log", na.value = "NA", direction= 1, 
+                       breaks = breaks, labels = scales::label_number(big.mark = ","))+
+  #scale_fill_viridis_d(option = "inferno", na.value = NA) +
+  # Add country borders
+  geom_sf(data = countries, fill = NA, color = "grey", size = 0.2, alpha= 0.25)+
+  # Define the map extent using the bounding box
+  coord_sf(xlim = c(map_bbox[1], map_bbox[2]), 
+           ylim = c(map_bbox[3], map_bbox[4]), 
+           expand = FALSE) +
+  theme_pubclean()+
+  # Customize the theme
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect( colour = "black",fill = NA,linewidth = 0.4),
+    panel.background = element_rect(fill = "white", color = NA), 
+    axis.text = element_text(size = 12, color = "black"),
+    axis.ticks = element_line(color = "black"),
+    plot.title = element_blank(),  # Remove map title
+    plot.margin = margin(5, 5, 5, 5),
+    axis.title = element_text(size =12))+
+  theme(
+    legend.position = c(0.01, 0.01),  # Bottom-left corner
+    legend.justification = c( 0,0),  
+    legend.background = element_rect(fill = "white", color = "white"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 8),
+    legend.key.height = unit(0.6, "cm"),
+    legend.key.width = unit(0.6, "cm"),
+    legend.margin = margin(0.1, 0.1, 0.1, 0.1, "cm"))+
+  #theme(legend.position = "right")+
+  labs(fill = "Number of\nobservations", x = NULL,  y = NULL)
+
+plot_map
+
+#ggsave("../Images/map_observations.png", plot_map, width= 8, height= 8)
+#ggsave("../Images/map_observations.svg", plot_map, width= 8, height= 8)
+
+```
+
+
+# DATA
+## 2.1 Countries
+### Data
+```{r}
+# Add histograms for countries
+countries <- data |> group_by(Country) |>  summarise(n = n())
+
+# Assign label before aggregating
+countries$Country <- ifelse(countries$n > 10000, countries$Country, "Other countries" )
+countries <- countries |> group_by(Country) |> summarise(n = sum(n), .groups = "drop")
+
+# Readjust the order
+levs <- countries |>  filter(Country != "Other countries") |>  distinct(Country, n) |>  arrange(desc(n)) |>  pull(Country)
+levs <- c(levs, "Other countries")
+countries$Country <- factor(countries$Country, levels = levs)
+```
+
+### Plot
+```{r}
+# Plot
+country_map <- ggplot(countries, aes(x = Country)) +
+  geom_bar(aes(y =n),
+           position = "stack", stat = "identity", width = 0.7, alpha = 0.6) +
+  theme_pubr() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  xlab(NULL) +
+  theme(legend.position = "none")+
+  ylab("Number of observations")+
+  scale_y_log10(breaks = c(1*10^1, 10^3, 10^5),
+                labels= c(expression(10),expression(10^3), expression(10^5)),
+                guide = "axis_logticks")+
+  theme(axis.title.y = element_text(size = 12))
+ 
+
+country_map
+
+
+#ggsave("../Images/observation_countries_subset.png", country_map, width= 5, height = 4)
+#ggsave("../Images/observation_countries_subset.svg", country_map, width= 5, height = 4)
+```
+
+
+
+
+# 2.1 Time
+```{r}
+# Get the year
+data$year <- as.integer(format(data$Date, "%Y"))
+
+# Get subset
+year_subset <- data |> group_by(year) |> summarise(total = n(), plants = length(unique(Plant_species)),
+                                                   pol = length(unique(Bee_species)))
+
+# Make plotable
+year_subset <- year_subset |> pivot_longer(cols = c(2:4), names_to = "data", values_to = "values")
+year_subset$data <- factor(year_subset$data, levels = c("total","plants","pol"))
+
+species_time <- ggplot(year_subset) +
+  geom_line(data = year_subset[year_subset$data== "total",], aes(x= year, y =values, color = data),
+            linewidth = 1.2)+
+  geom_line(data = year_subset[year_subset$data== "pol",], aes(x= year, y =values, color = data),
+            linewidth = 1.2)+
+  geom_line(data = year_subset[year_subset$data== "plants",], aes(x= year, y =values, color = data),
+            linewidth = 1.2)+
+  theme_pubr()+
+  theme(legend.title= element_blank())+
+  theme(legend.position = c(0.01, 1),   legend.justification = c(0, 1), legend.background = element_rect(fill='transparent'))+
+  scale_colour_manual(labels=c("total" = 'Total number of interactions', "plants"= 'Number of plant species', 
+                               "pol"='Number of bee species'),
+                        values = c( "total" = "#8DA0CB","plants" = "#CFCFCF","pol"   = "#FC8D62"))+
+  scale_y_log10(breaks = c(1*10^1, 10^3, 10^5),
+                labels= c(expression(10),expression(10^3), expression(10^5)),
+                guide = "axis_logticks")+
+  theme(axis.title.y = element_text(size = 12))+
+  xlab(NULL)+
+  ylab("Number of observations")
+
+species_time
+ggsave("../Images/observation_time_species_subset.png", species_time, width= 5, height = 4)
+ggsave("../Images/observation_time_species_subset.svg", species_time, width= 5, height = 4)
+
+```
+
+```{r}
+# Merge using patchwork
+
+# Update for the location of the legend
+species_time <- species_time +  theme(    legend.position = "inside",    legend.position.inside = c(0.01, 1),  legend.justification = c(0, 1)  )
+
+plot_map <- plot_map +  theme(    legend.position = "inside",    legend.position.inside = c(0.01, 0.01),    legend.justification = c(0, 0)  )
+
+
+# combine right-side plots first
+right_col <- country_map / species_time +  plot_layout(heights = c(1, 1))
+
+# combine with map
+plot <- plot_map + right_col +  plot_layout(widths = c(3, 2)) +  plot_annotation(tag_levels = "a") &   theme(plot.tag = element_text(face = "bold"))
+
+# Save
+ggsave("../Images/Overview.png", plot, width = 11, height = 6)
+
+```
+
+

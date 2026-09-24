@@ -1,0 +1,180 @@
+---
+title: "Identified plant conversion"
+author: "Willem Goossens"
+output: html_document
+---
+
+File to get most likely species from PlantNet.
+
+# START
+Empty environment
+```{r}
+rm(list=ls())
+wd <- getwd()
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(plantnet)
+library(httr)
+library(rvest)
+library(jsonlite)
+library(ttutils)
+```
+
+Load data
+```{r}
+# Observation.org data
+pol <- read.csv("../Data/Observation/observation_org_bees.csv")
+# Only get those observations with images
+obs <- pol[pol$has.photos,]
+```
+
+
+```{r}
+# Get identifications 
+results_file_one <- "observation_org_identification.RData"
+denied_file_one  <- "Permission_denied.csv"
+
+# Load results if they exist
+results_list_one <- readRDS(results_file_one)
+permission_denied_one <- read_csv(denied_file_one, show_col_types = FALSE) 
+```
+
+Extract data
+```{r}
+if(file.exists("../Results/Plantnet_identification.csv")){
+  pol_plantnet <- read.csv("../Results/Plantnet_identification.csv")
+  # Make usre the ID's are converted to character
+  pol_plantnet$GBIF_ID <- as.character(pol_plantnet$GBIF_ID)
+  pol_plantnet$POWO_ID <- as.character(pol_plantnet$POWO_ID)
+  pol_plantnet$IUCN <- as.character(pol_plantnet$IUCN)
+  pol_plantnet$IUCN_ID <- as.character(pol_plantnet$IUCN_ID)
+} else {
+  # Create empty data frame to paste most likely results in
+  pol_plantnet <- data.frame(ID = numeric(), Score = numeric(), Name = character(), Common_name = character(),
+                             Name_author= character(),Genus= character(), Genus_author= character(), 
+                             Family = character(), Family_author = character(), GBIF_ID = character(),
+                             POWO_ID = character(), IUCN_ID = character(), IUCN = character(), 
+                             Organ = character(), Genus_most= character(), URL = character(), n_pictures = numeric())
+}
+
+
+# Which ID's do we still need to convert
+id_pol <- as.numeric(names(list))
+id_pol <- id_pol[!id_pol %in% pol_plantnet$ID]
+```
+
+
+## Conversion
+```{r}
+# Define output schema 
+plant_schema <- c("ID", "Score", "Name", "Common_name", "Name_author", "Genus", "Genus_author", "Family", "Family_author", 
+                  "GBIF_ID", "POWO_ID", "IUCN_ID", "IUCN")
+
+# Run as loop
+for (id in id_pol) {
+  
+  # Get data from that id
+  predicted <- list[[as.character(id)]]
+  
+  # Make sure that it is not empty
+  if (length(predicted$predicted_organ) < 1) next
+  
+  # Get data for predicted plant
+  # Not every identification has GBID, POWO, IUCN data, so this has to be added only if present
+  predicted_plant <- predicted$predicted_plant %>%
+    mutate(
+      Score = score,
+      Name = species.scientificNameWithoutAuthor,
+      Common_name = species.commonNames,
+      Name_author = species.scientificNameAuthorship,
+      Genus = species.genus.scientificNameWithoutAuthor,
+      Genus_author = species.genus.scientificNameAuthorship,
+      Family = species.family.scientificNameWithoutAuthor,
+      Family_author = species.family.scientificNameAuthorship,
+      GBIF_ID = if ("gbif.id" %in% names(cur_data())) .data[["gbif.id"]] else NA,
+      POWO_ID = if ("powo.id" %in% names(cur_data())) .data[["powo.id"]] else NA,
+      IUCN_ID = if ("iucn.id" %in% names(cur_data())) .data[["iucn.id"]] else NA,
+      IUCN    = if ("iucn.category" %in% names(cur_data())) .data[["iucn.category"]] else NA
+    ) %>%
+    dplyr::select(any_of(plant_schema))
+
+  # Enforce missing columns explicitly
+  missing_cols <- setdiff(plant_schema, colnames(predicted_plant))
+  predicted_plant[missing_cols] <- NA
+  predicted_plant <- predicted_plant[, plant_schema]
+  
+  # Only save the first common name given if there are multiple known for one species
+  for (com_id in 1:nrow(predicted_plant)) {
+    predicted_plant$Common_name[[com_id]] <- as.character(predicted_plant$Common_name[[com_id]][1])
+  }
+    
+  # Make this again a character
+  predicted_plant$Common_name <- as.character(predicted_plant$Common_name)
+  predicted_plant$ID <- as.numeric(predicted_plant$ID)
+  
+  # First check for identifications which lack an organ
+  if (all(is.na(predicted$predicted_organ$organ))) {
+    
+    # We consider them as incorrect identified overall, so do not incorporate them
+    # create empty data frame to add
+    add <- data.frame(
+      ID = as.numeric(as.character(id)),
+      Score = NA_real_,
+      Name = NA_character_, 
+      Common_name = NA_character_,
+      Name_author = NA_character_,
+      Genus = NA_character_,
+      Genus_author = NA_character_,
+      Family = NA_character_,
+      Family_author = NA_character_, 
+      GBIF_ID = NA_character_,
+      POWO_ID = NA_character_,
+      IUCN_ID = NA_character_,
+      IUCN = NA_character_,
+      Genus_most = NA_character_,
+      Organ = "None",
+      URL = obs$link[obs$id == id][1],
+      n_pictures = nrow(predicted$predicted_organ))
+    
+    # Add to dataframe
+    pol_plantnet <- bind_rows(pol_plantnet, add)
+    
+  # Check whether any of the observations is a flower
+  # If any observation has a flower and others have eg bark, there is still one a flower, considered the most relevant for our work
+  # Hence, we will use this data
+  } else if (any(predicted$predicted_organ$organ[!is.na(predicted$predicted_organ$organ)] == "flower")) {
+    
+    # Get the best identification
+    pol_plantnet <- bind_rows(pol_plantnet, c(predicted_plant[which.max(predicted_plant$Score), ],
+                                              Organ = "flower", Genus_most = NA, URL = obs$link[obs$id == id][1],  n_pictures = nrow(predicted$predicted_organ)))
+    
+    # Get the best genus (we previously wanted to use this data in another way)
+    if (sort(table(predicted_plant$Genus), decreasing = TRUE)[1] > 1) {
+      genus_plantnet_sp <- predicted_plant$Genus[which.max(predicted_plant$Score)]
+      pol_plantnet$Genus_most[pol_plantnet$ID %in% id] <- genus_plantnet_sp
+    }
+    
+  # these are all the other identifications
+  } else {
+    
+    # Which organ has the highest likelihood
+    organ_identified <-predicted$predicted_organ[which.max(predicted$predicted_organ$score), ]
+    
+    # Get most likely species
+    pol_plantnet <- bind_rows(pol_plantnet, c(predicted_plant[which.max(predicted_plant$Score), ],
+                                              Organ = organ_identified$organ, Genus_most = NA, URL = obs$link[obs$id == id][1], n_pictures = nrow(predicted$predicted_organ)))
+    
+    # Get the best genus (we previously wanted to use this data in another way)
+    if (sort(table(predicted_plant$Genus), decreasing = TRUE)[1] > 1) {
+      genus_plantnet_sp <- predicted_plant$Genus[which.max(predicted_plant$Score)]
+      pol_plantnet$Genus_most[pol_plantnet$ID %in% id] <- genus_plantnet_sp
+    }
+  }
+}
+
+# Save the data
+#write_csv(pol_plantnet, "../Results/Plantnet_identification.csv")
+```

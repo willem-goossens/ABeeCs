@@ -1,0 +1,332 @@
+---
+title: "Pl@ntNet"
+author: "Willem Goossens"
+output: html_document
+---
+
+# START
+Empty environment
+```{r}
+rm(list=ls())
+```
+
+
+```{r}
+library(future)
+library(future.apply)
+library(rvest)
+library(httr)
+library(jsonlite)
+library(dplyr)
+library(readr)
+library(purrr)
+
+# Parallelism safe for Windows network-heavy tasks
+options(future.checks.connection = FALSE)
+
+# Pl@ntNet API key
+api_key <- "your_key"
+```
+
+
+# OBSERVATION
+## 1 Prepare
+```{r}
+# Ensure that the data can run in parallel
+future::plan(sequential)
+
+# Load your observation data
+pol <- read_csv("observation_org_bees.csv")
+
+# Only run here for Observation.org data with images
+obs <- pol[pol$`has photos`,]
+
+# Get vector of all id's
+id_pol_all <- unique(obs$id)
+```
+
+
+```{r}
+# Paths for saving the data
+results_file <- "observation_org_identification.RData"
+# Some images are denied access, save them
+denied_file  <- "Permission_denied.csv"
+# process 500 obs per batch to avoid overload
+batch_size   <- 500  
+
+# Load previous results if they exist
+if (file.exists(results_file)) results_list <- readRDS(results_file) else results_list <- list()
+if (file.exists(denied_file)) permission_denied <- read_csv(denied_file) else permission_denied <- data.frame(denied = character())
+
+# Reduce length of dataset 
+already_identified <- c(names(results_list), permission_denied$denied)
+id_pol <- setdiff(id_pol_all, already_identified)
+```
+
+
+
+## 2 Functions
+```{r}
+# Build the URL 
+# Based on August (2019)
+# Get all organs, set language in english and do not allow Pl@ntNet to reject images
+# API key should be defined previoulsy
+buildURL <- function(key, imageURL, organs = 'auto', lang = 'en', no_reject = 'false'){
+  URLencoded <- sapply(imageURL, FUN = URLencode, reserved = TRUE, repeated = TRUE)
+  paste0("https://my-api.plantnet.org/v2/identify/all?","images=", paste(URLencoded, collapse = "&images="), "&organs=", paste(organs, collapse = "&organs="),
+    "&no-reject=", no_reject, "&lang=", lang, "&api-key=", key)
+}
+
+
+# Process one URL function (later run in parallel)
+process_one_id <- function(id, obs, api_key){
+  
+  # Get all URL's of the specific observation
+  imageURL <- obs$link[obs$id == id]
+  imageURL <- unique(imageURL)
+  
+  # Read page and save id if access is denied
+  page <- tryCatch({
+    con <- url(imageURL, open = "rb")
+    on.exit(close(con), add = TRUE)
+    read_html(con)
+  }, error = function(e) NULL)
+  if (is.null(page)) return(list(id = id, denied = TRUE, result = NULL))
+  
+  
+  # Get all images from the page
+  imgs <- html_elements(page, "img")
+  src <- html_attr(imgs, "src")
+  datasrc <- html_attr(imgs, "data-src")
+  image_urls <- c(src, datasrc)
+  image_urls <- image_urls[!is.na(image_urls) & image_urls != ""]
+  image_urls <- grep("/media/photo/.*\\.(jpg|jpeg)", image_urls, value = TRUE)
+  image_urls <- sub("\\?.*$", "", image_urls)
+  image_urls <- unique(image_urls)
+  
+  # Paste the domain
+  domain <- sub("^https?://([^/]+).*", "\\1", imageURL)
+  base <- paste0("https://", domain)
+  image_urls <- ifelse(startsWith(image_urls, "http"), image_urls, paste0(base, image_urls))
+  
+  # Again save id if denied access to the picture
+  if (length(image_urls) < 1) return(list(id = id, denied = TRUE, result = NULL))
+  
+  # Create data where all identifications and organs can be saved
+  results_pol <- list()
+  results_pol_organs <- list()
+  
+  # If there are more than 5 images, run in chunks
+  chunks <- ceiling(length(image_urls)/5)
+  for (chunk in seq_len(chunks)) {
+    # Get the URL's for that chunk
+    length_chunks <- ceiling(length(image_urls)/chunks)
+    min_chunk <- (chunk-1)*length_chunks + 1
+    max_chunk <- min(chunk*length_chunks, length(image_urls))
+    picturesURL <- image_urls[min_chunk:max_chunk]
+    
+    # Create URL used
+    URL <- buildURL(api_key, picturesURL, organs = rep("auto", length(picturesURL)), lang = "en", no_reject = "true")
+    
+    # Run URL
+    response <- tryCatch(httr::GET(URL), error = function(e) NULL)
+    # If there is an error skip
+    if (is.null(response) || response$status_code != 200) next
+    
+    # Get all results
+    parsed_result <- fromJSON(content(response, "text"), flatten = TRUE)
+    
+    # Get organ
+    predicted_organ <- parsed_result$predictedOrgans[,2:3]
+    # Add URL and ID
+    predicted_organ <- cbind(ID = id, predicted_organ, imageURL = picturesURL)
+    
+    # Get plant identifications
+    predicted_plant <- cbind(ID = id, parsed_result$results)
+    
+    # Add data frame to the list of that species
+    results_pol[[length(results_pol) + 1]] <- predicted_plant
+    results_pol_organs[[length(results_pol_organs) + 1]] <- predicted_organ
+    
+    # small delay to reduce throttling
+    Sys.sleep(0.2)  
+  }
+  
+  # If nothing identified again add id to denied
+  if (length(results_pol) == 0 && length(results_pol_organs) == 0) return(list(id = id, denied = TRUE, result = NULL))
+  
+  # Bind results
+  results_pol <- bind_rows(results_pol)
+  results_pol_organs <- bind_rows(results_pol_organs)
+  
+  # Show
+  list(id = id, denied = FALSE, result = list(predicted_plant = results_pol, predicted_organ = results_pol_organs))
+}
+```
+
+
+## 3 Parrallel
+```{r}
+# Split all ID's in batches and select the number of batches you wish to run
+total_ids <- length(id_pol)
+batches <- split(id_pol, ceiling(seq_along(id_pol)/batch_size))
+batches <- batches[1:100]
+
+# Start the time
+begin <- Sys.time()
+
+# Run in parralel
+for (b in seq_along(batches)) {
+  batch_ids <- batches[[b]]
+  message("Processing batch ", b, " of ", length(batches), " (", length(batch_ids), " observations) at ", Sys.time())
+  
+  batch_results <- lapply(batch_ids, process_one_id, obs=obs, api_key=api_key)
+  
+  # Update results
+  for (res in batch_results) {
+    if (res$denied) {
+      permission_denied <- bind_rows(permission_denied, data.frame(denied = res$id))
+    } else {
+      results_list[[as.character(res$id)]] <- res$result
+    }
+  }
+  
+  # Checkpoint after every batch to save the data
+  # saveRDS(results_list, results_file)
+  #write_csv(permission_denied, denied_file)
+  
+  closeAllConnections()
+  gc()
+  Sys.sleep(2)
+}
+
+# How long did this take
+end <- Sys.time()
+end-begin
+```
+
+
+# INATURALIST
+## 1 Prepare
+```{r}
+# Load your observation data
+obs <- read_csv("../Data/Observation/iNaturalist_bees.csv", show_col_types = FALSE)
+photos <- read_csv("../Data/Observation/iNaturalist_bees_photos.csv", show_col_types = FALSE)
+```
+
+
+```{r}
+# Paths for checkpointing
+results_file <- "iNaturalist_identification.RData"
+denied_file  <- "Permission_denied_iNat.csv"
+
+# Load previous results if they exist
+if (file.exists(results_file)) results_list <- readRDS(results_file) else results_list <- list()
+if (file.exists(denied_file)) permission_denied <- read_csv(denied_file) else permission_denied <- data.frame(denied = numeric())
+
+already_identified <- c(names(results_list), permission_denied$denied)
+id_pol_all <- unique(obs$observation_uuid)
+id_pol <- setdiff(id_pol_all, already_identified)
+```
+
+## 2 Functions
+```{r}
+# Same buildURL function so not shown again
+
+# Process function for iNat
+process_one_id_inat <- function(id, photos, api_key){
+  
+  # Get URL from photos data
+  imageURL <- photos$photo_id[photos$observation_uuid == id]
+  imageURL <- unique(imageURL)
+  image_type <- photos$extension[photos$observation_uuid == id]
+  image_urls <- paste("https://inaturalist-open-data.s3.amazonaws.com/photos/", imageURL, "/original.", image_type, sep="")
+ 
+  # Add id to denied if not give result
+  if (length(image_urls) < 1) return(list(id = id, denied = TRUE, result = NULL))
+  
+  # Create lists to assign daa
+  results_pol <- list()
+  results_pol_organs <- list()
+  
+  # Run in chunks if more than 5 images
+  chunks <- ceiling(length(image_urls)/5)
+  for (chunk in seq_len(chunks)) {
+    # Get URLs within chunk
+    length_chunks <- ceiling(length(image_urls)/chunks)
+    min_chunk <- (chunk-1)*length_chunks + 1
+    max_chunk <- min(chunk*length_chunks, length(image_urls))
+    picturesURL <- image_urls[min_chunk:max_chunk]
+    
+    # Create URL
+    URL <- buildURL(api_key, picturesURL, organs = rep("auto", length(picturesURL)), lang = "en", no_reject = "true")
+    
+    # Get response Pl@ntNet
+    response <- tryCatch(httr::GET(URL), error = function(e) NULL)
+    
+    # Skip if no response or error
+    if (is.null(response) || response$status_code != 200) next
+    
+    # Get results
+    parsed_result <- fromJSON(content(response, "text"), flatten = TRUE)
+    
+    # Assign organ
+    predicted_organ <- parsed_result$predictedOrgans[,2:3]
+    predicted_organ <- cbind(ID = id, predicted_organ, imageURL = picturesURL)
+    
+    # Assign identities
+    predicted_plant <- cbind(ID = id, parsed_result$results)
+    
+    # Add to list
+    results_pol[[length(results_pol) + 1]] <- predicted_plant
+    results_pol_organs[[length(results_pol_organs) + 1]] <- predicted_organ
+    
+    Sys.sleep(0.2)  # small delay to reduce throttling
+  }
+  
+  # Assign ID if problem
+  if (length(results_pol) == 0 && length(results_pol_organs) == 0) return(list(id = id, denied = TRUE, result = NULL))
+  
+  results_pol <- bind_rows(results_pol)
+  results_pol_organs <- bind_rows(results_pol_organs)
+  
+  list(id = id, denied = FALSE, result = list(predicted_plant = results_pol, predicted_organ = results_pol_organs))
+}
+```
+
+
+## 3 Parrallel
+```{r}
+# Get batches
+total_ids <- length(id_pol)
+batches <- split(id_pol, ceiling(seq_along(id_pol)/batch_size))
+batches <- batches[1]
+
+# Begin time
+begin <- Sys.time()
+
+for (b in seq_along(batches)) {
+  batch_ids <- batches[[b]]
+  message("Processing batch ", b, " of ", length(batches), " (", length(batch_ids), " observations) at ", Sys.time())
+  
+  batch_results <- lapply(batch_ids, process_one_id_inat, photos=photos, api_key=api_key)
+  
+  # Update results
+  for (res in batch_results) {
+    if (res$denied) {
+      permission_denied <- bind_rows(permission_denied, data.frame(denied = res$id))
+    } else {
+      results_list[[as.character(res$id)]] <- res$result
+    }
+  }
+  
+  # Checkpoint after every batch
+  #saveRDS(results_list, results_file)
+  #write_csv(permission_denied, denied_file)
+  
+  gc()
+  Sys.sleep(2)
+}
+end <- Sys.time()
+end-begin
+```

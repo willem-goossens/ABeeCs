@@ -1,0 +1,395 @@
+---
+title: "Taxonomy plot"
+author: "Willem Goossens"
+output: html_document
+---
+
+
+# START
+Empty environment
+```{r}
+#rm(list=ls())
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(scico) 
+library(ape)
+library(tidytree)
+library(phytools)
+library(ggnewscale)
+library(ggtreeExtra)
+library(ggtree)
+library(rtrees)
+library(geomtextpath)
+```
+
+
+Load data
+```{r}
+# overall dataset
+data <- read_csv("../Data/Observation/plantnet_dataset_newest_newest.csv", show_col_types = FALSE)
+red <- read_csv("../Extra/Intermediate/red.csv")
+```
+
+
+
+# BEE
+## 1.1 Data
+```{r}
+# Reduce size dataset
+subset <- data[(!is.na(data$Plant_user) | (!is.na(data$Plant_plantnet) & data$Plantnet_score >= 0.619 )),]
+subset <- subset |> group_by(Bee_accepted_name, Plant_name) |> filter(n() >= 2) |> ungroup()
+
+# Look at bee species only
+subset_test <- subset |> group_by(Bee_species) |> filter(n() >=2) |> ungroup()
+subset_test <- subset_test[!is.na(subset_test$Bee_species),]
+unique(subset_test$Plant_rank)
+
+#### Plant interactions
+# We only get interactions with plant species at the relevant levels
+subset_test <- subset_test[!is.na(subset_test$Plant_species),]
+# Count the number of plants associated with the bee species
+names <- subset_test |> group_by( Bee_species, Bee_genus, Bee_family) |>  summarise(n= length(unique(Plant_species)))
+```
+
+
+### Red list
+```{r}
+#### Red list
+# Get number of observations for each genus
+red_genus <- red |> filter(gbif_rank == "species") |> group_by(genus) |> summarise(n = n())
+# Add the number of species per genus in Europe
+names$n_europe <- red_genus$n[match(names$Bee_genus, red_genus$genus)]
+```
+
+
+## 1.2 Tree
+### Load
+```{r}
+# Load tree 
+bee_tree <- read.tree("C:/Users/u0166342/Documents/Doctoraat/Observation/Extra/Names/beetreelife.nwk")
+
+# Get the Maximum likelihood tree
+bee_tree <- bee_tree[[1]]
+
+# Clean tip labels to match names
+bee_tree$tip.label <- gsub("_", " ", bee_tree$tip.label)
+# Get dataset of tree labels
+tree <- as.data.frame(bee_tree$tip.label)
+
+# Check genera 
+tree$genus <- vegdata::parse.taxa(tree$`bee_tree$tip.label`)[[2]]
+
+# How many are not in our dataset
+names$Bee_genus[!names$Bee_genus %in% tree$genus]
+tree <- tree[!duplicated(tree$`bee_tree$tip.label`),]
+
+# Add cubitalia and tetraloniella
+additions <- data.frame(new_tip  = c("Cubitalia parvicornis", "Tetraloniella alticincta"),
+                        sister  = c("Eucera longicornis",  "Tetralonia malvae"))
+
+
+# Add dummy branch lengths if missing
+if (is.null(bee_tree$edge.length)) {
+  bee_tree$edge.length <- rep(1, nrow(bee_tree$edge))
+}
+
+for (i in seq_len(nrow(additions))) {
+  if (!additions$new_tip[i] %in% bee_tree$tip.label) {
+    # get the branch length of the sister tip
+    sister_node <- which(bee_tree$tip.label == additions$sister[i])
+    # skip if sister not found in tree
+    sister_edge <- which(bee_tree$edge[, 2] == sister_node)
+    sister_length <- bee_tree$edge.length[sister_edge]
+    bee_tree <- bind.tip(bee_tree, tip.label = additions$new_tip[i],  where  = sister_node, position  = 0.001 * 0.1)
+  }
+}
+
+# Make again the tree tips (added two genera)
+tree <- as.data.frame(bee_tree$tip.label)
+
+# Check genera again 
+tree$genus <- vegdata::parse.taxa(tree$`bee_tree$tip.label`)[[2]]
+
+# How many are not in our dataset
+# All are present
+names$Bee_genus[!names$Bee_genus %in% tree$genus]
+# Only get our genera
+tree <- tree[tree$genus %in% names$Bee_genus,]
+# Remove duplicated
+tree <- tree[!duplicated(tree$genus),]
+# 58 genera are remaining
+length(unique(names$Bee_genus))
+# This corresponds with the data in our database
+
+# Prune tree to keep all species in my database
+pruned_tree <- keep.tip(bee_tree, tree$`bee_tree$tip.label`)
+```
+
+
+### Data
+```{r}
+# prepare genus-level metadata
+tax_genus <- subset_test |>
+  filter(!is.na(Bee_genus), Bee_rank == "species") |>
+  group_by(Bee_genus, Bee_family) |>
+  summarise(n = length(unique(Bee_accepted_name)), unique = length(unique(Plant_species)), .groups = "drop")
+# Add the number of genera in general present
+tax_genus$n_europe <- red_genus$n[match(tax_genus$Bee_genus, red_genus$genus)]
+
+# Add number of genera
+number_tax_gen <- subset_test |> group_by(Bee_genus) |> summarise( n = n())
+
+# Add number of observations
+tax_genus$n_obs <- number_tax_gen$n[match(tax_genus$Bee_genus, number_tax_gen$Bee_genus)]
+
+
+# Save
+write.excel <- function(x,row.names=FALSE,col.names=TRUE,...) { write.table(x,"clipboard",sep="\t",row.names=row.names,col.names=col.names,...)}
+write.excel(tax_genus)
+
+# Pruned tree to one tip per genus duplicate
+genus_tree <- pruned_tree
+# Rename tips from species to genus
+genus_tree$tip.label <- tree$genus[match(genus_tree$tip.label, tree$`bee_tree$tip.label`)]
+
+# Change names otherwise does not work (other data for plotting)
+number_genus <- tax_genus
+colnames(number_genus) <- c("Genus","Family","Number","Interactions","Total")
+number_genus$rel <- number_genus$Number / number_genus$Total
+
+# Save tax genus
+#write.csv(tax_genus,"../Results/genus_list_europe.csv")
+```
+
+## 1.3 Plot
+### Data
+```{r}
+# Get the order of tip labels as they appear in the tree
+tip_order_bee <- ggtree(genus_tree, layout = "fan")$data %>%  filter(isTip) %>%  arrange(angle) %>%  pull(label)
+
+# Match to orders and get their sequence around the fan
+order_sequence_bee <- tax_genus$Bee_family[match(tip_order_bee, tax_genus$Bee_genus)]
+
+# Set factor levels based on first appearance around the fan
+ordered_levels_bee <- unique(order_sequence_bee[!is.na(order_sequence_bee)])
+tax_genus$Bee_family <- factor(tax_genus$Bee_family, levels = ordered_levels_bee)
+number_genus$Family<- factor(number_genus$Family, levels = ordered_levels_bee)
+
+# Number of observations
+n_spec <- as.data.frame(table(data$Bee_species))
+
+# Dataset for colouring
+family_cols <- scico(6+1, palette = "managua")
+family_cols <- family_cols[1:6]
+# Duplicate dataset
+col_family <- family_cols
+
+# Assign names
+family_cols <- setNames(family_cols, c("Melittidae","Andrenidae",  "Colletidae","Halictidae",  "Megachilidae","Apidae"))
+```
+
+### Plot
+```{r}
+# Plot
+p <- ggtree(genus_tree, layout = "fan", open.angle = 15,
+            colour = "grey40", linewidth = 0.3) %<+% tax_genus +
+  # tree tip points
+  geom_tippoint(aes(colour = Bee_family, size = (log10(unique))),
+                alpha = 1) +
+  # tip labels
+  geom_tiplab(size = 2.2, offset = 5, fontface = "italic",
+              colour = "grey20", align = F) +
+  # outer bar chart
+  new_scale_fill() +
+  geom_fruit(
+    data        = number_genus,
+    geom        = geom_bar,
+    mapping     = aes(y = Genus, x = rel, fill = Family),
+    pwidth      = 0.3,
+    offset      = 0.12,
+    orientation = "y",
+    stat        = "identity",
+    colour      = NA ,
+    axis.params = list(axis     = "x",
+                      text.size = 2.5,
+                      title = "Coverage",
+                      title.size = 3,
+                      hjust    = 0.5,
+                      vjust    = 1,
+                      nbreak   = 3 ),
+     grid.params=list()) +
+  # shared colour scales
+  scale_colour_manual(values = family_cols, name = "Family",
+                      na.translate = FALSE,
+                      guide = guide_legend(order = 1,
+                                           override.aes = list(size = 3))) +
+  scale_fill_manual(values = family_cols, name = "Family",
+                    na.translate = FALSE,
+                    guide = guide_legend(order = 1)) +
+  scale_size_continuous(name = "Unique\ninteractions", range = c(1, 5),
+                        labels = c("1", "10", "100", "1000"),
+                        guide = guide_legend(order = 2)) +
+  theme(
+    legend.position      = "right",
+    legend.title         = element_text(size = 9, face = "bold"),
+    legend.text          = element_text(size = 8),
+    legend.key.size      = unit(0.4, "cm"),
+    legend.spacing.y     = unit(0.2, "cm"),
+    plot.margin          = margin(10, 10, 10, 10)
+  ) 
+p
+
+bee_tree <- p
+
+#ggsave("../Images/bee_tree_publication_test.png", p, width = 5.5, height = 4, dpi = 300)
+#ggsave("../Images/bee_tree_publication_test.svg", p, width = 5.5, height = 4, dpi = 300)
+```
+
+
+
+
+# PLANTS
+## 2.1 Taxonomy
+```{r}
+# Change family names to names in the tree
+data$Plant_family[data$Plant_family %in% c("Viscaceae")] <- "Santalaceae"
+data$Plant_family[data$Plant_family %in% c("Turneraceae")] <- "Passifloraceae"
+data$Plant_family[data$Plant_family %in% c("Thesiaceae")] <- "Santalaceae"
+data$Plant_family[data$Plant_family %in% c("Quiinaceae")] <- "Ochnaceae"
+data$Plant_family[data$Plant_family %in% c("Parnassiaceae")] <- "Celastraceae"
+data$Plant_family[data$Plant_family %in% c("Octoknemaceae")] <- "Olacaceae"
+data$Plant_family[data$Plant_family %in% c("Namaceae")] <- "Boraginaceae"
+data$Plant_family[data$Plant_family %in% c("Mystropetalaceae")] <- "Balanophoraceae"
+data$Plant_family[data$Plant_family %in% c("Melianthaceae")] <- "Francoaceae"
+data$Plant_family[data$Plant_family %in% c("Lennoaceae")] <- "Boraginaceae"
+data$Plant_family[data$Plant_family %in% c("Hydrophyllaceae")] <- "Boraginaceae"
+data$Plant_family[data$Plant_family %in% c("Hydnoraceae")] <- "Aristolochiaceae"
+data$Plant_family[data$Plant_family %in% c("Heliotropiaceae")] <- "Boraginaceae"
+data$Plant_family[data$Plant_family %in% c("Ehretiaceae")] <- "Boraginaceae"
+data$Plant_family[data$Plant_family %in% c("Cordiaceae")] <- "Boraginaceae"
+data$Plant_family[data$Plant_family %in% c("Cochlospermaceae")] <- "Bixaceae"
+data$Plant_family[data$Plant_family %in% c("Aptandraceae")] <- "Olacaceae"
+```
+
+
+```{r}
+# Downsize dataset
+data$Plant_rank <- toupper(data$Plant_rank)
+subset <- data[(!is.na(data$Plant_user) | (!is.na(data$Plant_plantnet) & data$Plantnet_score >= 0.619 )),]
+subset <- subset |> group_by(Bee_accepted_name, Plant_name) |> filter(n() >= 2) |> ungroup()
+# Only get bee species associated
+subset <- subset[!is.na(subset$Bee_species),]
+
+# We will only use species level identifications
+subset_test <- subset[!is.na(subset$Plant_species),]
+
+# Get names
+names <- subset_test  |> distinct(Plant_species, Plant_genus, Plant_family, Plant_rank, Pollination_syndrome) 
+colnames(names) <- c("species","genus","family","rank", "pollination_syndrome")
+
+# Only retain the insect pollinated species
+names <- names[names$pollination_syndrome %in% c("insect"),]
+
+# Get one observation per family
+names_fam <- names |> distinct(species, genus, family)
+names_fam <- names_fam[!duplicated(names_fam$family),]
+
+# Create database to add order
+gbif <- name_backbone_checklist(names_fam$family[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(names_fam$family)/10*(i-1))
+  end <- floor(length(names_fam$family)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(names_fam$family[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+```
+
+
+## 2.2 Tree
+### Load
+```{r}
+# Get tree
+phylo_output <- get_tree(sp_list = names[, 1:3], taxon = "plant")
+
+# Prune the tree
+phylo_output <- ape::keep.tip(phylo_output, gsub(" ","_",names_fam$species))
+
+# Rename tips from genus to family
+phylo_output$tip.label <- names$family[match(phylo_output$tip.label, gsub(" ", "_",names$species))]
+
+# Get names dataset again to add the classes
+names_two <- subset_test  |> group_by(Plant_name, Plant_genus, Plant_family, Plant_rank) |> summarise(n=n())
+```
+
+### Link
+```{r}
+# Check whether it is complete
+nrow(names_fam[!names_fam$family %in% phylo_output$tip.label,])
+# Add orders
+names_fam$order <- gbif$order[match(names_fam$family, gbif$verbatim_name)]
+names_fam_plot <- names_fam[,c(3:4)]
+
+# Get the number of Bee_accepted_name species per plant family
+numbers <- subset_test |> group_by(Plant_family) |> summarise(n = length(unique(Bee_species)))
+names_fam_plot$n <- numbers$n[match(names_fam_plot$family, numbers$Plant_family)]
+
+# Count number of family observations per order, only show if they have more than 2 observation
+names_fam_plot <- names_fam_plot |> group_by(order) |> mutate(n_order = n())
+names_fam_plot$col <- ifelse(names_fam_plot$n_order>=3, names_fam_plot$order, "Other")
+
+# Get the order of tip labels as they appear in the tree
+tip_order <- ggtree(phylo_output, layout = "fan")$data %>%  filter(isTip) %>%  arrange(angle) %>%  pull(label)
+
+# Match to orders and get their sequence around the fan
+order_sequence <- names_fam_plot$col[match(tip_order, names_fam_plot$family)]
+
+# Set factor levels based on first appearance around the fan
+ordered_levels <- unique(order_sequence[!is.na(order_sequence)])
+names_fam_plot$col <- factor(names_fam_plot$col, levels = ordered_levels)
+
+# Now plot
+n_orders <- length(ordered_levels)
+col <- scico(n_orders+2, palette = "romaO")
+col <- col[1:n_orders]
+cols_order <- col
+cols_order <- setNames(col, ordered_levels)
+```
+
+
+### Plot
+```{r}
+p <- ggtree(phylo_output, layout = "fan", open.angle = 15,
+            colour = "grey40", linewidth = 0.3) %<+% names_fam_plot +
+  scale_colour_manual(values = col,
+                      name = "Order",
+                      na.translate = FALSE,
+                      guide = guide_legend(order = 1)) +  
+  geom_tippoint(aes(colour = col, size = (n)),
+                alpha = 1) +
+  geom_tiplab(size = 2, offset = 6, fontface = "italic",
+              colour = "grey20", align = F) +
+  scale_size_continuous(name = "Unique\ninteractions", range = c(1, 5), 
+                        breaks = c(1, 10, 100, 250,500),
+                        guide = guide_legend(order = 2))+
+  theme(legend.position = "right",
+        legend.title = element_text(size = 9, face = "bold"),
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(0.4, "cm"),
+        legend.spacing.y  = unit(0.2, "cm"),
+        plot.margin = margin(10, 10, 10, 10))
+p
+# Save plot
+tree_plant <- p
+
+#ggsave("../Images/plant_tree_publication.png", p, width = 7, height = 7, dpi = 300)
+#ggsave("../Images/plant_tree_publication.svg", p, width = 7, height = 7, dpi = 300)
+```
+

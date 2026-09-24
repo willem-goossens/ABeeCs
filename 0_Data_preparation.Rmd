@@ -1,0 +1,419 @@
+---
+title: "Data preparation"
+author: "Willem Goossens"
+output: html_document
+---
+
+File based on the complete dataset downloaded.
+We filter that data here, based on location, space and pollinator species
+
+# START
+```{r}
+rm(list=ls())
+```
+
+
+```{r}
+library(tidyverse)
+library(sp)
+library(sf)
+```
+
+
+# OBSERVATION.ORG
+## 1 LOAD
+```{r}
+# We load the data
+obs <- read_csv("../Data/Observation/observation_org_hymenoptera_1995_2025.csv")
+```
+
+
+## 2 FILTER
+### 2.1 Quality
+```{r}
+# We remove observations for which the observer has expressed uncertainty
+length(obs$id[obs$`is certain`==FALSE])
+obs <- obs[obs$`is certain`==TRUE,]
+
+# We remove those that were rejected
+length(obs$id[obs$`validation status` == "rejected"])
+obs <- obs[!obs$`validation status` == "rejected", ]
+
+# We remove obscure observations (either due to privacy or conservation efforts)
+length(obs$id[obs$obscurity =="1"])
+obs <- obs[obs$obscurity=="0",]
+
+# We check how many observations have pictures
+sum(obs$`has photos`, na.rm=T)
+```
+
+
+
+### 2.2 Space
+```{r}
+# We get all European countries in the dataset
+europe <- c("Albania", "Andorra", "Austria",  "Belarus", "Belgium", "Bosnia and Herzegovina", "Bulgaria", "Croatia", "Cyprus", "Czechia", 
+  "Denmark",  "Estonia","Finland", "France", "Germany", "Greece", "Hungary","Iceland", "Ireland", "Italy","Kosovo", "Latvia", "Liechtenstein", "Lithuania", "Luxembourg",
+  "Malta", "Moldova", "Monaco", "Montenegro",  "Netherlands", "North Macedonia", "Norway","Poland", "Portugal", "Romania",  "San Marino", "Serbia", "Slovakia", "Slovenia",
+  "Spain","Sweden", "Switzerland","Ukraine", "United Kingdom", "Vatican City")
+
+# We focus on these countries, by far the most
+obs <- obs[obs$country %in% europe,]
+
+# We check now already how many observations there are in every country
+regions <- obs |> group_by(country) |> summarise(n=n())
+
+# We only retain those with coordinate uncertainty below 250 m
+length(obs$accuracy[obs$accuracy >250])
+obs <- obs[!obs$accuracy>250 ,]
+
+# Here there may still be some without coordinate uncertainty, they are removed later
+sum(is.na(obs$accuracy))
+
+# We only retain observations with coordinates
+length(obs[is.na(obs$lat) | is.na(obs$lng),])
+obs <- obs[!is.na(obs$lat) | !is.na(obs$lng),]
+```
+
+### 2.3 Time
+```{r}
+# We make the date column the correct type and check whether the delivered data indeed falls between 1995 and 2025
+obs$date <- as.Date(obs$date)
+
+# Between 14 februari 1995 and 18 november 2025
+min(obs$date)
+max(obs$date)
+
+# Most data is retrieved over the last years
+median(obs$date)
+```
+
+
+### 2.4 Species
+```{r}
+# Only retain bee families
+obs <- obs[obs$family %in%  c( "Andrenidae", "Apidae", "Colletidae","Halictidae","Megachilidae","Melittidae"),]
+
+# Number of observations with related species
+length(obs$id[!is.na(obs$`related species`)])
+
+# Reduce number of relevant columns
+col_save <- c("id","date","time","species name","scientific name","family","species type","number","sex","life stage","activity",
+              "related species","related species name","lat","lng","accuracy","country","validation status","has photos", "link")
+obs <- obs[, colnames(obs) %in% col_save]
+```
+
+
+### 2.5 Euro+Med
+```{r}
+# We will assign the Euro+Med classification, which is interesting because it largely follows country borders but takes large islands as seperate biogeographic units
+# This would help in network analyses
+# The Observation.org data is already well delineated but this is not the case for the data from 
+
+# We first make this a smaller dataset, allowing faster data handling
+coord <- obs |> dplyr::select("id", "country","lat", "lng")
+colnames(coord)[2] <- "observation_country"
+
+# Make geometrical dataset
+coord <- st_as_sf(coord, coords = c("lng","lat"),crs = 4326)
+
+# Get regions
+medRegions <- read_sf("~/Doctoraat/Impact/Extra data/EURO+MED/Regions", "Emed_regions")
+medRegions <- st_transform(medRegions, CRS("+proj=longlat +datum=WGS84"))
+
+# Assign all plots which are within one of the regions to the given region
+sf_use_s2(T) #S2 can provide better performance for certain types of spatial operations, especially when dealing with large spatial datasets.
+joinedData <- st_join(coord, medRegions[-20,], join = st_within)
+
+# There is something strange with the geometry of the Netherlands, this is why we treat it specially here
+sf_use_s2(F)
+res <- st_join(coord, medRegions[20,], join = st_within)
+joinedData[(res$Region == "Netherlands") %in% TRUE,] <- res[(res$Region == "Netherlands") %in% TRUE,]
+sf_use_s2(T)
+
+# Check how many not assigned
+sum(is.na(joinedData$Region))
+
+# For some we do not have a country observation but we have a region, add this
+joinedData$country[is.na(joinedData$country)] <- joinedData$Region[is.na(joinedData$country)]
+```
+
+
+Assign remaining
+```{r}
+# Which plots are not assigned, 
+# Many of them are located near the coast
+remainingPlots <- joinedData[is.na(joinedData$country),]
+
+# Assign all to closest region
+# We perform this using planar coordinate assignment to get nearest feature
+sf_use_s2(F)
+remainingPlots <- st_join(remainingPlots[, 1:2], medRegions, join = st_nearest_feature)
+sf_use_s2(T)
+
+# Assign again
+joinedData[is.na(joinedData$country),] <- remainingPlots
+joinedData$country[is.na(joinedData$country)] <- joinedData$Region[is.na(joinedData$country)]
+```
+
+
+```{r}
+# change United Kingdom and Ireland names
+joinedData$country <- gsub("United.Kingdom","United Kingdom",joinedData$country)
+joinedData$country <- gsub("Republic.of.Ireland","Ireland",joinedData$country)
+
+# change to Sicily
+joinedData$country[joinedData$country %in% "Italy & Malta"] <- joinedData$Region[joinedData$country %in% "Italy & Malta"]
+# change to Turkey 
+joinedData$country[joinedData$Region %in% "Greece & Turkey"] <- "Greece"
+
+# Check overlap
+sum(joinedData$observation_country == joinedData$country)/length(joinedData$id)
+# Which are not
+remaining <- joinedData[joinedData$observation_country != joinedData$country, ]
+# Some are indeed the same country but with different names
+```
+
+
+Check overlap countries and Euro+MED
+```{r}
+# We will remove all points that are not within a Euro+Med layer
+# To do so we first create a bounding box around Europe, facilitates the cropping
+europe_bbox <- st_bbox(c(xmin = -30, xmax = 80, ymin = 20, ymax = 90))
+europe_polygon <- st_as_sfc(europe_bbox)
+
+# Crop to the regions
+sf_use_s2(F)
+joinedData_cropped <- st_crop(joinedData, europe_polygon)
+joinedData_cropped <- st_crop(joinedData_cropped, medRegions, crop=F)
+sf_use_s2(T)
+
+# Remove some
+removed <- joinedData[!joinedData$id %in% joinedData_cropped$id,] 
+
+# Save the cropped data 
+joinedData <- joinedData_cropped
+obs <- obs[obs$id %in% joinedData$id, ]
+
+# We will use the Euro+Med classication to align with iNaturalist
+obs$euromed_region <- joinedData$country[match(obs$id, joinedData$id)]
+```
+
+### 2.6 Save
+```{r}
+# write_csv(obs, "../Data/Observation/observation_org_bees.csv")
+```
+
+
+# INATURALIST
+## 1 LOAD
+### 1.1 Taxa
+```{r}
+# First clear the environment
+rm(list=ls())
+```
+
+
+```{r}
+# Read taxa data
+taxa <- read_delim("~/Doctoraat/Observation/Data/iNaturalist/taxa.csv", delim = "\t", escape_double = FALSE, trim_ws = TRUE, show_col_types = FALSE)
+
+# Retrieve hymenoptera data
+hymenoptera_id <- taxa[taxa$name %in% "Hymenoptera",]
+hymenoptera <- taxa[taxa$taxon_id == hymenoptera_id$taxon_id |  grepl(paste0("(^|/)", hymenoptera_id$taxon_id, "(/|$)"), taxa$ancestry),]
+
+# Bee root id (Antophila is the epifamily)
+bee_root_id <- taxa[taxa$name == "Anthophila" & taxa$rank == "epifamily",]
+
+# Extract all bees
+bees <- taxa[taxa$taxon_id == bee_root_id$taxon_id |  grepl(paste0("(^|/)", bee_root_id$taxon_id, "(/|$)"), taxa$ancestry),]
+
+# Only retain the bee data
+rm(list =  setdiff(ls(),c("bees")))
+```
+
+
+### 1.2 Observations
+```{r}
+# Connect with duck to fasten the data handling
+con <- dbConnect(duckdb::duckdb(), dbdir = "inat.duckdb")
+duckdb_register(con, "bees", bees)
+
+# Read observations
+obs <- dbGetQuery(con, " SELECT * FROM read_csv_auto('../Data/iNaturalist/observations.csv', delim = '\t' )
+  WHERE taxon_id IN ( SELECT taxon_id  FROM bees) ")
+
+# Disconnect
+dbDisconnect(con)
+```
+
+
+## 2 FILTER
+### 2.1 Quality
+```{r}
+# Check the quality options
+obs |> group_by(quality_grade) |> summarise(n = n())
+
+# Check uncertainty coordinates
+length(obs$positional_accuracy[obs$positional_accuracy >250])
+obs <- obs |> filter(positional_accuracy <= 250)
+```
+
+
+### 2.2 Date
+```{r}
+# Filter date older than 1995
+obs$observed_on <- as.Date(obs$observed_on)
+
+# Remove older than 1995 or after 2025 (none)
+obs <- obs |> filter(observed_on >= "1995-01-01" )
+obs <- obs |> filter(observed_on < "2026-01-01" )
+```
+
+
+### 2.3 Euro+Med
+```{r}
+# Again focus on Euro+Med regions
+
+# Only get European data
+obs <- obs[obs$longitude>= -20 & obs$longitude<=45,]
+obs <- obs[obs$latitude>= 30 & obs$latitude <= 73,]
+
+# Remove data without coordinates
+obs <- obs[!is.na(obs$latitude) | !is.na(obs$longitude),]
+
+# Reduce data for easier handling
+coord <- obs[, c("observation_uuid", "latitude", "longitude")] |> st_as_sf(coords = c("longitude","latitude"),crs = 4326)
+
+# get Euro+Med maks
+medRegions <- read_sf("~/Doctoraat/Impact/Extra data/EURO+MED/Regions", "Emed_regions")
+medRegions <- st_transform(medRegions, CRS("+proj=longlat +datum=WGS84"))
+
+
+# Assign all plots which are within one of the regions to the given region
+sf_use_s2(T) #S2 can provide better performance for certain types of spatial operations, especially when dealing with large spatial datasets.
+joinedData <- st_join(coord, medRegions[-20,], join = st_within)
+
+# There is something strange with the geometry of the Netherlands, this is why we treat it specially here
+sf_use_s2(F)
+res <- st_join(coord, medRegions[20,], join = st_within)
+joinedData[(res$Region == "Netherlands") %in% TRUE,] <- res[(res$Region == "Netherlands") %in% TRUE,]
+sf_use_s2(T)
+
+# Give the points without a country their region
+joinedData$country[is.na(joinedData$country)] <- joinedData$Region[is.na(joinedData$country)]
+
+# Are all plots assigned
+sum(is.na(joinedData$country))
+```
+
+
+
+```{r}
+# Which plots are not assigned, many of them are located near the coast
+remainingPlots <- joinedData[is.na(joinedData$country),]
+
+# We perform this using planar coordinate assignment to get nearest feature
+sf_use_s2(F)
+remainingPlots <- st_join(remainingPlots[, 1:2], medRegions, join = st_nearest_feature)
+sf_use_s2(T)
+
+# Some look quite far away, only assign if they are within 1 km
+remainingPlots$distance <- NA
+# Check whether the European regions are within 1 km
+for(i in which(is.na(remainingPlots$distance))[1] : nrow(remainingPlots)){
+    remainingPlots$distance[i] <- st_distance(remainingPlots[i,], medRegions[medRegions$Region==remainingPlots$Region[i] &!is.na(medRegions$Region),])
+}
+
+# Assign country when unavailable
+remainingPlots$country[is.na(remainingPlots$country)] <- remainingPlots$Region[is.na(remainingPlots$country)]
+
+# Those further then 1000 m are NA
+remainingPlots$country[remainingPlots$distance > 1000] <- NA
+remainingPlots$Region[remainingPlots$distance > 1000] <- NA
+
+# Assign remaining data to joinedData
+joinedData[is.na(joinedData$country),1:11] <- remainingPlots[, 1:11]
+```
+
+
+```{r}
+# Change United Kingdom and Ireland
+joinedData$country <- gsub("United.Kingdom","United Kingdom",joinedData$country)
+joinedData$country <- gsub("Republic.of.Ireland","Ireland",joinedData$country)
+# Change to Sicily
+joinedData$country[joinedData$country %in% "Italy & Malta"] <- joinedData$Region[joinedData$country %in% "Italy & Malta"]
+
+# Remove all non-European countries
+europe_regions <- c("Albania","Austria","Belarus","Belgium","Bosnia-Herzegovina", "Bulgaria", "Croatia","Czech Republic", "Denmark","Estonia",
+  "Finland","France", "Germany","Greece", "Hungary","Iceland","Italy","Ireland","Latvia", "Lithuania","Luxemburg","Moldavia", "Montenegro",
+  "Netherlands","North Macedonia","Norway", "Poland", "Portugal", "Romania","Slovakia",  "Slovenia",  "Spain",  "Sweden",  "Switzerland", "Sicily","Serbia & Kosovo",
+  "Ukraine", "United Kingdom")
+
+# Which are these non-European countries
+nonEU <- joinedData[!joinedData$country %in% europe_regions, ]
+# Remove them in this list
+joinedData <- joinedData |> filter(country %in% europe_regions)
+
+# Remove observations from non-European countries
+obs <- obs |> filter(observation_uuid %in% joinedData$observation_uuid)
+# Assign region/ country (here used both terms)
+obs$Country <- joinedData$country[match(obs$observation_uuid, joinedData$observation_uuid)]
+```
+
+
+### 2.4 Anomaly Score
+```{r}
+# An anomaly lower than 1 suggests that it is unlikely for the species to be observed there
+summary(obs$anomaly_score)
+
+# Remove all with observation anomalies lower than 1
+# There are many observations without anomaly scores, we will keep them
+length(obs$observation_uuid[obs$anomaly_score < 1 ])
+obs <- obs |> filter(anomaly_score >= 1 | is.na(anomaly_score))
+```
+
+### 2.5 Species
+```{r}
+# Reduce bees data to European occurences
+bees <- bees[bees$taxon_id %in% obs$taxon_id,]
+
+# Add to observation data
+obs <- left_join(obs, bees, by = c("taxon_id"= "taxon_id"))
+```
+
+
+### 2.6 License
+```{r}
+# Connect with duck and retrieve the picture data
+con <- dbConnect(duckdb::duckdb(), dbdir = "inat.duckdb")
+duckdb_register(con, "obs", obs)
+
+# Read observations relevant here
+photos <- dbGetQuery(con, " SELECT * FROM read_csv_auto('../Data/iNaturalist/photos.csv', delim = '\t' )  
+                     WHERE observation_uuid IN ( SELECT observation_uuid  FROM obs) ")
+
+# Disconnect
+dbDisconnect(con)
+```
+
+
+```{r}
+#check the licences
+save <- photos[photos$license %in% c("CC-BY","CC-BY-NC","CC0"),]
+# Remove the others from the database
+obs <- obs[obs$observation_uuid %in% photos$observation_uuid,]
+
+# create URLs
+photos$URL <- paste("https://www.inaturalist.org/photos/", photos$photo_id, sep="")
+```
+
+
+### 2.6 Save
+```{r}
+# observation 
+obs <- left_join(obs, bees, by = c("taxon_id"= "taxon_id"))
+
+#write_csv(obs, "../Data/Observation/iNaturalist_bees.csv")
+#write_csv(photos, "../Data/Observation/iNaturalist_bees_photos.csv")
+```

@@ -1,0 +1,1279 @@
+---
+title: "Dataset comparsion"
+author: "Willem Goossens"
+date: "2026-09-18"
+output: html_document
+---
+
+# START
+Empty environment
+```{r}
+rm(list=ls())
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(giscoR)
+library(rgbif)
+library(scico) 
+library(sf)
+library(sp)
+library(ape)
+library(tidytree)
+library(phytools)
+library(ggnewscale)
+library(ggtreeExtra)
+library(ggtree)
+library(rtrees)
+library(geomtextpath)
+```
+
+
+Load data
+```{r}
+# overall dataset
+data <- read_csv("../Data/Observation/plantnet_dataset_newest_newest.csv", show_col_types = FALSE)
+```
+
+
+# EuPPollNet
+## 2.1 Load
+```{r}
+# load data and get only bee species
+lanuza_data <- read_csv("C:/Users/u0166342/Documents/Doctoraat/Observation/Extra/Names/EUPPollNet/Interaction_data.csv", show_col_types = FALSE)
+lanuza_data <- lanuza_data[lanuza_data$Pollinator_family %in% c("Apidae","Halictidae","Megachilidae","Andrenidae","Melittidae", "Colletidae"),]
+
+# There was an error in how two names were saved, making it impossoible to open the data
+lanuza_data$Pollinator_original_name[lanuza_data$Pollinator_accepted_name == "Bombus soroeensis"] <- "Bombus soroeensis"
+```
+
+## 2.2 Bees
+### Accepted
+```{r}
+# Get names from Lanuza
+lanuza <- lanuza_data |> group_by(Pollinator_accepted_name, Pollinator_genus, Pollinator_family, Pollinator_rank) |> summarise(n = n())
+# Get our own names
+abeecs <- data |> group_by(Bee_accepted_name, Pol_original, Bee_rank, Bee_species, Bee_genus, Bee_family) |> summarise(n= n())
+
+# Link accepted names
+lanuza$abeecs <- abeecs$Bee_accepted_name[match(lanuza$Pollinator_accepted_name, abeecs$Bee_accepted_name)]
+sum(is.na(lanuza$abeecs))
+
+# Also assign the non-accepted ones
+# But first check them
+check <- abeecs[abeecs$Pol_original %in% lanuza$Pollinator_accepted_name[is.na(lanuza$abeecs)],]
+# Looks okay
+# Link these non-accepted names
+lanuza$abeecs[is.na(lanuza$abeecs)] <- abeecs$Bee_accepted_name[match(lanuza$Pollinator_accepted_name[is.na(lanuza$abeecs)], abeecs$Pol_original)]
+sum(is.na(lanuza$abeecs))
+# 102 species remain
+
+# Save the final names, these are the ones that are in our dataset
+lanuza$final_abeecs <- lanuza$abeecs
+```
+
+
+### Remaining
+```{r}
+# We will check the rest against gbif
+remaining <- lanuza[is.na(lanuza$abeecs),]
+
+# Create database
+gbif <- name_backbone_checklist(remaining$Pollinator_accepted_name[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(remaining$Pollinator_accepted_name)/10*(i-1))
+  end <- floor(length(remaining$Pollinator_accepted_name)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(remaining$Pollinator_accepted_name[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+
+
+### Accepted
+# Get accepted species
+acc_gbif <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "EXACT",]
+lanuza$abeecs[is.na(lanuza$abeecs)] <- acc_gbif$species[match(lanuza$Pollinator_accepted_name[is.na(lanuza$abeecs)], acc_gbif$verbatim_name)]
+
+
+
+### Higher ranks
+# Get higher ranks and check
+acc_gbif <-  gbif[gbif$status== "ACCEPTED" & gbif$matchType == "HIGHERRANK",]
+acc_gbif$species <- c( "Lasioglossum haesitans","Halictus microcardia", "Halictus pulvereus","Halictus semitectus")
+lanuza$abeecs[is.na(lanuza$abeecs)] <- acc_gbif$species[match(lanuza$Pollinator_accepted_name[is.na(lanuza$abeecs)], acc_gbif$verbatim_name)]
+
+
+### Synonyms
+# get synonyms
+acc_gbif <- gbif[gbif$status== "SYNONYM" & gbif$matchType == "EXACT" ,]
+lanuza$abeecs[is.na(lanuza$abeecs)] <- acc_gbif$species[match(lanuza$Pollinator_accepted_name[is.na(lanuza$abeecs)], acc_gbif$verbatim_name)]
+sum(is.na(lanuza$abeecs))
+# 1 remaining
+
+
+### Manual
+# The last name cannot be found in gbif
+lanuza$abeecs[is.na(lanuza$abeecs)] <- lanuza$Pollinator_accepted_name[is.na(lanuza$abeecs)]
+
+
+### Assign
+# Check whether any more species are now found
+lanuza$final_abeecs[is.na(lanuza$final_abeecs)] <- abeecs$Bee_accepted_name[match(lanuza$abeecs[is.na(lanuza$final_abeecs)] , abeecs$Bee_accepted_name)]
+lanuza$final_abeecs[is.na(lanuza$final_abeecs)] <- abeecs$Bee_accepted_name[match(lanuza$abeecs[is.na(lanuza$final_abeecs)] , abeecs$Pol_original)]
+colnames(lanuza)[6] <- "Pollinator_accepted_GBIF"
+colnames(lanuza)[5] <- "EUPPollNet_number"
+# 91 species left
+sum(is.na(lanuza$final_abeecs))
+```
+
+
+### Add
+```{r}
+# Now also add our species that are not in Lanuza
+abeecs <- abeecs |> group_by(Bee_accepted_name, Bee_rank, Bee_species, Bee_genus, Bee_family) |> distinct(Bee_accepted_name, Bee_rank, .keep_all = F)
+missing_species <- abeecs[!abeecs$Bee_accepted_name %in% lanuza$final_abeecs,]
+lanuza[767:(767+685), ] <- NA 
+lanuza[(767):(767 + length(missing_species$Bee_accepted_name) - 1), c("final_abeecs", "final_rank")] <- missing_species[, c("Bee_accepted_name","Bee_rank")]
+lanuza$final_rank <- toupper(lanuza$final_rank)
+
+# Add data
+lanuza$final_rank <- lanuza$final_rank[match(lanuza$final_abeecs, abeecs$Bee_accepted_name)]
+colnames(lanuza)[7:8] <- c("abeecs_name","abeecs_rank")
+
+# we will now also link species, genus and family data
+lanuza$abeecs_species <- NA
+lanuza$abeecs_species <- abeecs$Bee_species[match(lanuza$abeecs_name, abeecs$Bee_accepted_name)] 
+lanuza$abeecs_genus <- NA
+lanuza$abeecs_genus <- abeecs$Bee_genus[match(lanuza$abeecs_name, abeecs$Bee_accepted_name)] 
+lanuza$abeecs_family <- NA
+lanuza$abeecs_family <- abeecs$Bee_family[match(lanuza$abeecs_name, abeecs$Bee_accepted_name)] 
+```
+
+
+
+```{r}
+# check first overall against Lanuza
+lanuza_not_us <- lanuza[is.na(lanuza$abeecs_name),]
+lanuza_not_us |> group_by(Pollinator_rank) |> summarise(n =n())
+# 91 species were not in our database
+
+# Assign the lanuza data
+lanuza_pol <- left_join(lanuza_data, lanuza)
+```
+
+## 2.3 Plants
+### Accepted
+```{r}
+# Get plant species
+plants <- lanuza_data |> group_by(Plant_accepted_name, Plant_rank, Plant_genus, Plant_family) |>  summarise(n= n())
+
+# Link with our data
+abeecs <- data |> group_by(Plant_name, Plant_rank, Plant_genus, Plant_family, User_original) |> summarise(n= n())
+
+# Link accepted names
+plants$abeecs <- abeecs$Plant_name[match(plants$Plant_accepted_name, abeecs$Plant_name)]
+plants$abeecs_rank <- abeecs$Plant_rank[match(plants$Plant_accepted_name, abeecs$Plant_name)]
+# 112 not yet
+sum(is.na(plants$abeecs))
+
+
+
+# Check the missing ones
+# Remove the hybrid notification from the names
+remaining <- plants[is.na(plants$abeecs),]
+remaining$Plant_accepted_name <- gsub(" × "," ",remaining$Plant_accepted_name)
+# Link accepted names
+remaining$abeecs <- abeecs$Plant_name[match(remaining$Plant_accepted_name, abeecs$Plant_name)]
+remaining$abeecs_rank <- abeecs$Plant_rank[match(remaining$Plant_accepted_name, abeecs$Plant_name)]
+# 101 not yet
+sum(is.na(remaining$abeecs))
+# Assign
+plants[is.na(plants$abeecs), c("abeecs","abeecs_rank")] <- remaining[,c("abeecs","abeecs_rank") ]
+
+# Check against the original names
+remaining <- plants[is.na(plants$abeecs),]
+remaining$abeecs <- abeecs$Plant_name[match(remaining$Plant_accepted_name, abeecs$User_original)]
+remaining$abeecs_rank <- abeecs$Plant_rank[match(remaining$Plant_accepted_name, abeecs$User_original)]
+# 94 not yet
+sum(is.na(remaining$abeecs))
+# Assign
+plants[is.na(plants$abeecs), c("abeecs","abeecs_rank")] <- remaining[,c("abeecs","abeecs_rank") ]
+
+
+# Get genera data
+plants$abeecs_genus <- abeecs$Plant_genus[match(plants$abeecs, abeecs$Plant_name)]
+# Check the missing ones
+remaining <- plants[is.na(plants$abeecs),]
+
+# Assign some genera
+check_genera <- remaining[remaining$Plant_rank %in% c("GENUS", "VARIETY"),]
+# Are they in our database
+check_genera$abeecs_genus <- abeecs$Plant_genus[match(check_genera$Plant_accepted_name, abeecs$Plant_genus)]
+check_genera$abeecs_genus[is.na(check_genera$abeecs_genus)] <- abeecs$Plant_genus[match(check_genera$Plant_accepted_name[is.na(check_genera$abeecs_genus)],
+                                                                                        word(abeecs$User_original, 1))]
+check_genera$abeecs_genus[check_genera$Plant_accepted_name %in% "Cotoneaster hybr"] <- "Cotoneaster"
+# Assign these to our data
+plants$abeecs_genus[is.na(plants$abeecs_genus)] <- check_genera$abeecs_genus[match(plants$Plant_accepted_name[is.na(plants$abeecs_genus)] , check_genera$Plant_accepted_name)]
+plants$abeecs_rank[is.na(plants$abeecs_rank) & !is.na(plants$abeecs_genus)] <- "genus"
+plants$abeecs[is.na(plants$abeecs)] <- check_genera$abeecs_genus[match(plants$Plant_accepted_name[is.na(plants$abeecs)] , check_genera$Plant_accepted_name)]
+
+
+
+# check the missing ones
+remaining <- plants[is.na(plants$abeecs),]
+# 77 remaining
+```
+
+
+###GBIF
+```{r}
+# create database
+gbif <- name_backbone_checklist(remaining$Plant_accepted_name[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(remaining$Plant_accepted_name)/10*(i-1))
+  end <- floor(length(remaining$Plant_accepted_name)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(remaining$Plant_accepted_name[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+
+# Create an extra column for the accepted names that are not necessarily in our database
+plants$GBIF_accepted <- plants$abeecs
+
+# Get accepted species
+acc_gbif <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "EXACT",]
+plants$GBIF_accepted[is.na(plants$GBIF_accepted)] <- acc_gbif$species[match(plants$Plant_accepted_name[is.na(plants$GBIF_accepted)], acc_gbif$verbatim_name)]
+plants$abeecs_rank[is.na(plants$abeecs_rank) & !is.na(plants$GBIF_accepted)] <- "species"
+plants$GBIF_accepted[is.na(plants$GBIF_accepted) & plants$Plant_accepted_name %in% acc_gbif$verbatim_name] <- "Weigela"
+plants$abeecs_rank[is.na(plants$abeecs_rank) & !is.na(plants$GBIF_accepted)] <- "genus"
+
+# get higher ranks and check
+acc_gbif <-  gbif[gbif$status== "ACCEPTED" & gbif$matchType == "HIGHERRANK",]
+acc_gbif$species <- c("Bellidiastrum michelii")
+plants$GBIF_accepted[is.na(plants$GBIF_accepted)] <- acc_gbif$species[match(plants$Plant_accepted_name[is.na(plants$GBIF_accepted)], acc_gbif$verbatim_name)]
+plants$abeecs_rank[is.na(plants$abeecs_rank) & !is.na(plants$GBIF_accepted)] <- c("species")
+
+
+# get synonyms
+acc_gbif <- gbif[gbif$status== "SYNONYM" & gbif$matchType == "EXACT" ,]
+acc_gbif$final <- acc_gbif$subspecies
+acc_gbif$final[is.na(acc_gbif$final)] <- acc_gbif$species[is.na(acc_gbif$final)] 
+acc_gbif$final[is.na(acc_gbif$final)]  <- acc_gbif$genus[is.na(acc_gbif$final)] 
+# assign
+plants$GBIF_accepted[is.na(plants$GBIF_accepted)] <- acc_gbif$final[match(plants$Plant_accepted_name[is.na(plants$GBIF_accepted)], acc_gbif$verbatim_name)]
+plants$abeecs_rank[plants$GBIF_accepted %in% acc_gbif$final[!is.na(acc_gbif$subspecies)]] <- "subspecies"
+plants$abeecs_rank[plants$GBIF_accepted %in% acc_gbif$final[!is.na(acc_gbif$species)] & is.na(plants$abeecs_rank)] <- "species"
+plants$abeecs_rank[plants$GBIF_accepted %in% acc_gbif$final[!is.na(acc_gbif$genus)] & is.na(plants$abeecs_rank)] <- "genus"
+
+
+
+# Check the missing ones
+remaining <- plants[is.na(plants$GBIF_accepted),]
+gbif <- gbif[gbif$verbatim_name %in% remaining$Plant_accepted_name,]
+# Assign
+plants$GBIF_accepted[is.na(plants$GBIF_accepted)] <-  gbif$species[match(plants$Plant_accepted_name[is.na(plants$GBIF_accepted)], gbif$verbatim_name)]
+plants$abeecs_rank[is.na(plants$abeecs_rank) & !is.na(plants$GBIF_accepted)] <- "species"
+
+
+
+# get all plants again
+data_plants <- data |> group_by(Plant_plantnet, Plantnet_rank, Plantnet_genus, Plant_user, User_rank, User_genus) |> summarise(n= n())
+# now we are certain :)
+any(data_plants %in% remaining$Plant_accepted_name)
+
+# remaining
+remaining <- plants[is.na(plants$abeecs_rank),]
+
+# check whether any more species are now found
+# 18 more
+sum(!is.na(abeecs$Plant_rank[match(plants$GBIF_accepted[is.na(plants$abeecs)] , abeecs$Plant_name)]))
+plants$abeecs_rank[is.na(plants$abeecs)] <- abeecs$Plant_rank[match(plants$GBIF_accepted[is.na(plants$abeecs)] , abeecs$Plant_name)]
+plants$abeecs[is.na(plants$abeecs)] <- abeecs$Plant_name[match(plants$GBIF_accepted[is.na(plants$abeecs)] , abeecs$Plant_name)]
+plants$abeecs_genus[is.na(plants$abeecs_genus)] <- abeecs$Plant_genus[match(plants$GBIF_accepted[is.na(plants$abeecs_genus)] , abeecs$Plant_name)]
+# 59 remain
+sum(is.na(plants$abeecs))
+```
+
+
+### Add
+```{r}
+# Link with our data
+abeecs <- data |> group_by(Plant_name, Plant_rank, Plant_genus, Plant_family) |> summarise(n= n())
+
+# add missing species 
+missing_species <- abeecs[!abeecs$Plant_name %in% plants$abeecs,]
+length(missing_species$Plant_name)
+
+# now also add our species that are not in Lanuza
+plants[1384:(1384+ 21976), ] <- NA 
+plants[1384:(1384+ 21976), c("abeecs", "abeecs_rank","abeecs_genus")] <- missing_species[, c("Plant_name","Plant_rank","Plant_genus")]
+plants$abeecs_rank <- toupper(plants$abeecs_rank)
+
+
+# we will now also link species, genus and family data
+plants$abeecs_species <- NA
+plants$abeecs_species <- data$Plant_species[match(plants$abeecs, data$Plant_name)] 
+plants$abeecs_genus <- NA
+plants$abeecs_genus <- data$Plant_genus[match(plants$abeecs, data$Plant_name)] 
+plants$abeecs_family <- NA
+plants$abeecs_family <- data$Plant_family[match(plants$abeecs, data$Plant_name)] 
+
+# we will try to add plant family data
+plants$abeecs_genus[is.na(plants$abeecs)] <- abeecs$Plant_genus[match(plants$Plant_genus[is.na(plants$abeecs)], abeecs$Plant_genus)]
+plants$abeecs_family[is.na(plants$abeecs)] <- abeecs$Plant_family[match(plants$Plant_family[is.na(plants$abeecs)], abeecs$Plant_family)]
+
+# change some
+plants$abeecs_genus[plants$Plant_accepted_name %in% "Weigelia"] <- "Weigela"
+
+
+# check remaining
+remaining <- plants[is.na(plants$abeecs),]
+remaining |> group_by(Plant_rank) |> summarise(n =n())
+# 1 genus, 58 species
+```
+
+
+```{r}
+# Check how many of our data is not in Lanuza
+check <- plants[is.na(plants$Plant_accepted_name),]
+check |> group_by(abeecs_rank) |> summarise(n = n())
+
+
+# Check species
+abeecs_spec <- vegdata::parse.taxa(abeecs$Plant_name[abeecs$Plant_rank %in% c("subspecies","variety")])
+abeecs_spec$species <- paste(abeecs_spec$genus, abeecs_spec$epi1, sep= " ")
+not <- abeecs_spec[!abeecs_spec$species %in% plants$GBIF_accepted,]
+abeecs_spec <- abeecs_spec[abeecs_spec$species %in% plants$GBIF_accepted,]
+check$species <- abeecs_spec$species[match(check$abeecs, abeecs_spec$original)]
+sum(!is.na(check$species))
+# An additional 198 species are present to species level (just not subspecies or variety)
+
+# Check genera
+abeecs_spec <- abeecs[abeecs$Plant_genus %in% plants$Plant_genus,]
+not <-  abeecs[!abeecs$Plant_genus %in% plants$Plant_genus,]
+check$genus <- abeecs_spec$Plant_genus[match(check$abeecs, abeecs_spec$Plant_name)]
+sum(!is.na(check$genus))
+# An additional 8764 to genus level
+
+# family
+abeecs_spec <- abeecs[abeecs$Plant_family %in% plants$Plant_family,]
+check$family <- abeecs_spec$Plant_family[match(check$abeecs, abeecs_spec$Plant_name)]
+sum(!is.na(check$family))
+# And 18535 families
+
+
+# check number of unique species, genera and families not in the data
+length(unique(check$abeecs[is.na(check$species)]))
+length(unique(check$abeecs_genus[is.na(check$genus)]))
+length(unique(check$abeecs_family[is.na(check$family)]))
+
+# plants names
+colnames(plants)[6:11] <- c("abeecs_plant","abeecs_rank_plant","abeecs_genus_plant", "GBIF_accepted","abeecs_species_plant","abeecs_family_plant")
+
+# so we have 4487 genera, 21882 species and 270 families more
+lanuza_pol <- left_join(lanuza_pol, plants)
+# check is.na
+check_na <- lanuza_pol[is.na(lanuza_pol$abeecs_plant),]
+lanuza_pol$abeecs_plant[is.na(lanuza_pol$abeecs_plant)] <- lanuza_pol$GBIF_accepted[is.na(lanuza_pol$abeecs_plant)]
+lanuza_pol$abeecs_rank[is.na(lanuza_pol$abeecs_rank)] <- lanuza_pol$Plant_rank[is.na(lanuza_pol$abeecs_rank)]
+lanuza_pol$abeecs_species[is.na(lanuza_pol$abeecs_species) & lanuza_pol$Plant_rank %in% "SPECIES"] <- 
+  lanuza_pol$abeecs_plant[is.na(lanuza_pol$abeecs_species) & lanuza_pol$Plant_rank %in% "SPECIES"]
+write_csv(lanuza_pol, "../Extra/Intermediate/lanuza_pol.csv")
+```
+
+
+### Interaction
+```{r}
+# Lanuza
+interact_lanuza <- lanuza_pol |> group_by(Pollinator_accepted_GBIF, abeecs_plant) |> summarise(n = n())
+interact_lanuza$int <- paste(interact_lanuza$Pollinator_accepted_GBIF, interact_lanuza$abeecs_plant, sep = " X ")
+```
+
+
+
+# GloBI
+## 3.1 Load
+```{r}
+# load data
+globi <-  read_csv("C:/Users/u0166342/Documents/Doctoraat/Observation/Extra/Names/GloBI/GloBI_Curated.csv", show_col_types = FALSE)
+```
+
+
+## 3.2 Region
+```{r}
+# Reduce dataset
+coord <- globi |> dplyr::select(id, x, y)
+coord <- coord[!is.na(coord$x) | !is.na(coord$y),]
+
+# make geometrical dataset
+coord <- st_as_sf(coord, coords = c("x","y"),crs = 4326)
+
+# create box around Europe
+europe_polygon <- st_bbox(c(xmin = -20, xmax = 45, ymin = 30, ymax = 73))
+europe_polygon <- st_as_sfc(europe_polygon)
+
+sf_use_s2(FALSE) 
+
+# Get general region cropped ou
+coord <- st_crop(coord, europe_polygon)
+
+# Get country boundaries
+countries <- gisco_get_countries(resolution = "03", region = "Europe") |> st_make_valid()
+cyprus <- gisco_get_countries(country = "CY", resolution = "03") |> st_make_valid()
+countries <- bind_rows(countries, cyprus)
+
+# Islands to keep separate from their mainland country
+nuts2 <- gisco_get_nuts(nuts_level = 2, resolution = "03")
+
+# Sicily, Sardinia, Balearic Islands, Corsica, Crete
+islands_to_split <- c("Sicilia", "Sardegna", "Illes Balears", "Corse", "Κρήτη")
+islands_lookup <- nuts2 |> st_drop_geometry() |> filter(NUTS_NAME %in% islands_to_split) |> select(NUTS_ID, NUTS_NAME)
+   
+# Filter out these region
+islands <- nuts2 |> filter(NUTS_ID %in% islands_lookup$NUTS_ID) |> st_make_valid()
+
+# Now that countries and islands exist, look up their code
+country_lookup <- countries |> st_drop_geometry() |> distinct(CNTR_ID, NAME_ENGL)
+island_lookup  <- islands   |> st_drop_geometry() |> distinct(NUTS_ID, NUTS_NAME)
+
+# Join data 
+region_lookup <- bind_rows(country_lookup |> rename(code = CNTR_ID, name = NAME_ENGL),island_lookup  |> rename(code = NUTS_ID,  name = NUTS_NAME))
+
+# Spatial join islands and countries
+country_join <- st_join(coord, countries[, "CNTR_ID"], join = st_within) |>  st_drop_geometry() |> distinct(id, .keep_all = TRUE)
+island_join <- st_join(coord, islands[, "NUTS_ID"], join = st_within) |>  st_drop_geometry() |> distinct(id, .keep_all = TRUE)
+
+# Get the island or country 
+result <- country_join |> left_join(island_join, by = "id") |>  mutate(final_code = coalesce(NUTS_ID, CNTR_ID))
+
+# Coastal points that missed every polygon
+missing_ids <- result$id[is.na(result$final_code)]
+missing <- coord[coord$id %in% missing_ids, ]
+
+if (nrow(missing) > 0) {
+  nearest <- st_join(missing, countries[, "CNTR_ID"], join = st_nearest_feature)
+  nearest$distance <- as.numeric(st_distance(missing, countries[match(nearest$CNTR_ID, countries$CNTR_ID), ], by_element = TRUE))
+
+  # Assign points within a 5 km radius due to coordinate problems
+  max_dist <- 5000  
+  nearest$CNTR_ID[nearest$distance > max_dist] <- NA
+
+  idx <- match(nearest$id, result$id)
+  result$final_code[idx] <- ifelse(is.na(result$final_code[idx]), nearest$CNTR_ID, result$final_code[idx])
+}
+
+sf_use_s2(TRUE)
+
+# Assign the code, then look up the name from it
+coord$Country_code <- result$final_code[match(coord$id, result$id)]
+coord$Country <- region_lookup$name[match(coord$Country_code, region_lookup$code)]
+
+# Remove observations outside of Europe (or Sicily)
+coord <- coord[!is.na(coord$Country), ]
+unique(coord$Country)
+coord <- coord[!coord$Country %in% "Russian Federation",]
+
+# Get the GloBI data
+globi <- globi[globi$id %in% coord$id,]
+```
+
+## 3.3 Bees
+### Accepted
+```{r}
+# Get unique pollinators
+pol <- globi |> group_by(bee_species, bee_genus, bee_family) |> summarise(n =n())
+
+# First check against our data
+abeecs <- data |> group_by(Bee_accepted_name, Pol_original, Bee_rank, Bee_species, Bee_genus, Bee_family) |> summarise(n= n())
+# Link
+pol$abeesc_name <- abeecs$Bee_accepted_name[match(pol$bee_species, abeecs$Bee_accepted_name)]
+pol$abeesc_rank <- abeecs$Bee_rank[match(pol$bee_species, abeecs$Bee_accepted_name)]
+sum(is.na(pol$abeesc_name))
+# 106 left
+
+
+# Also assign the non-accepted ones
+# But first check them
+check <- abeecs[abeecs$Pol_original %in% pol$bee_species[is.na(pol$abeesc_name)],]
+# Looks okay
+# Link these non-accepted names
+pol$abeesc_name[is.na(pol$abeesc_name)] <- abeecs$Bee_accepted_name[match(pol$bee_species[is.na(pol$abeesc_name)], abeecs$Pol_original)]
+sum(is.na(pol$abeesc_name))
+# 99 left
+
+
+# Get GBIF name
+pol$GBIF_name <- pol$abeesc_name
+```
+
+
+### GBIF
+```{r}
+# we will check the rest against 
+remaining <- pol[is.na(pol$GBIF_name),]
+
+
+# Create database
+gbif <- name_backbone_checklist(remaining$bee_species[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(remaining$bee_species)/10*(i-1))
+  end <- floor(length(remaining$bee_species)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(remaining$bee_species[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+
+
+# Get accepted species
+acc_gbif <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "EXACT",]
+pol$GBIF_name[is.na(pol$GBIF_name)] <- acc_gbif$species[match(pol$bee_species[is.na(pol$GBIF_name)], acc_gbif$verbatim_name)]
+# Get synonyms
+acc_gbif <- gbif[gbif$status== "SYNONYM" & gbif$matchType == "EXACT" ,]
+pol$GBIF_name[is.na(pol$GBIF_name)] <- acc_gbif$species[match(pol$bee_species[is.na(pol$GBIF_name)],acc_gbif$verbatim_name)]
+# Get accepted species that are spelled slightly differently
+acc_gbif <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "VARIANT",]
+pol$GBIF_name[is.na(pol$GBIF_name)] <- acc_gbif$species[match(pol$bee_species[is.na(pol$GBIF_name)], acc_gbif$verbatim_name)]
+
+# Check again against our data
+pol$abeesc_name[is.na(pol$abeesc_name)] <- abeecs$Bee_accepted_name[match(pol$GBIF_name[is.na(pol$abeesc_name)], abeecs$Bee_accepted_name)]
+pol$abeesc_rank[is.na(pol$abeesc_rank)] <- abeecs$Bee_rank[match(pol$GBIF_name[is.na(pol$abeesc_rank)], abeecs$Bee_accepted_name)]
+
+# There are 98 species not in our final dataset
+sum(is.na(pol$abeesc_name))
+
+# join
+globi_pol <- left_join(globi, pol)
+```
+
+
+```{r}
+# have a look at the number of missing pollinators
+missing_species <- abeecs[!abeecs$Bee_accepted_name %in% pol$GBIF_name,]
+
+pol[758:(758+822), ] <- NA 
+pol[(758):(758 + length(missing_species$Bee_accepted_name) - 1), c("abeesc_name", "abeesc_rank")] <- missing_species[, c("Bee_accepted_name","Bee_rank")]
+pol$abeesc_rank <- toupper(pol$abeesc_rank)
+```
+
+
+## 3.4 Plants
+### Accepted
+```{r}
+# get plant species
+plants <- globi |> group_by(plant_species, plant_genus, plant_family) |> summarise(n= n())
+
+# link with our data
+abeecs <- data |> group_by(Plant_name, Plant_rank, Plant_genus, Plant_family, User_original) |> summarise(n= n())
+
+# Link accepted names
+plants$abeecs <- abeecs$Plant_name[match(plants$plant_species, abeecs$Plant_name)]
+plants$abeecs_rank <- abeecs$Plant_rank[match(plants$plant_species, abeecs$Plant_name)]
+sum(is.na(plants$abeecs))
+# 280 remain
+# Link original names
+plants$abeecs[is.na(plants$abeecs_rank)] <- abeecs$Plant_name[match(plants$plant_species[is.na(plants$abeecs_rank)], abeecs$User_original)]
+plants$abeecs_rank[is.na(plants$abeecs_rank)] <- abeecs$Plant_rank[match(plants$plant_species[is.na(plants$abeecs_rank)], abeecs$User_original)]
+sum(is.na(plants$abeecs))
+# 268 remain
+
+# Get genera data
+plants$abeecs_genus <- abeecs$Plant_genus[match(plants$abeecs, abeecs$Plant_name)]
+```
+
+### GBIF
+```{r}
+# Check the missing ones
+remaining <- plants[is.na(plants$abeecs),]
+
+# check GBIF
+# create database
+gbif <- name_backbone_checklist(remaining$plant_species[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(remaining$plant_species)/10*(i-1))
+  end <- floor(length(remaining$plant_species)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(remaining$plant_species[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+
+# GBIF name
+plants$GBIF_name <- plants$abeecs
+
+# get accepted species
+acc_gbif <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "EXACT",]
+plants$GBIF_name[is.na(plants$GBIF_name)] <- acc_gbif$species[match(plants$plant_species[is.na(plants$GBIF_name)], acc_gbif$verbatim_name)]
+plants$GBIF_name[is.na(plants$GBIF_name)] <- acc_gbif$genus[match(plants$plant_species[is.na(plants$GBIF_name)], acc_gbif$verbatim_name)]
+
+# get synonyms
+acc_gbif <- gbif[gbif$status== "SYNONYM" & gbif$matchType == "EXACT" ,]
+acc_gbif$final <- acc_gbif$subspecies
+acc_gbif$final[is.na(acc_gbif$final)] <- acc_gbif$species[is.na(acc_gbif$final)]
+acc_gbif$final[is.na(acc_gbif$final)] <- acc_gbif$genus[is.na(acc_gbif$final)]
+plants$GBIF_name[is.na(plants$GBIF_name)] <- acc_gbif$final[match(plants$plant_species[is.na(plants$GBIF_name)], acc_gbif$verbatim_name)]
+
+# get higher ranks
+acc_gbif <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "HIGHERRANK" ,]
+acc_gbif <- acc_gbif[acc_gbif$rank %in% "GENUS",]
+plants$GBIF_name[is.na(plants$GBIF_name)] <- acc_gbif$genus[match(plants$plant_species[is.na(plants$GBIF_name)], acc_gbif$verbatim_name)]
+
+
+# get accepted species
+acc_gbif <- gbif[gbif$status== "ACCEPTED" & gbif$matchType == "VARIANT",]
+plants$GBIF_name[is.na(plants$GBIF_name)] <- acc_gbif$species[match(plants$plant_species[is.na(plants$GBIF_name)], acc_gbif$verbatim_name)]
+```
+
+
+```{r}
+# check the missing ones
+remaining <- plants[is.na(plants$GBIF_name),]
+
+
+# create database
+gbif <- name_backbone_checklist(remaining$plant_species[1], kingdom = "Plantae")
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(remaining$plant_species)/10*(i-1))
+  end <- floor(length(remaining$plant_species)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(remaining$plant_species[begin: end], kingdom = "Plantae")
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+
+# Change some
+change <- data.frame( old = c("Gyrophyllum verticillatum","Consolida","Rhinanthus major", "Cotoneaster nanshan", "Hebe"),
+                      new = c("Anacis verticillata", "Delphinium","Rhinanthus angustifolius", "Cotoneaster adpressus", "Veronica"))
+
+# Change these
+remaining$GBIF_name[remaining$plant_species %in% change$old] <- change$new[match(remaining$plant_species[remaining$plant_species %in% change$old], change$old)]
+
+# Assign remaining
+remaining$GBIF_name[is.na(remaining$GBIF_name)] <- remaining$plant_species[is.na(remaining$GBIF_name)] 
+plants[is.na(plants$GBIF_name),] <- remaining
+```
+
+
+```{r}
+# Get all plants again
+data_plants <- data |> group_by(Plant_plantnet, Plantnet_rank, Plantnet_genus, Plant_user, User_rank, User_genus) |> summarise(n= n())
+# Now we are certain :)
+any(data_plants %in% remaining$plant_species)
+
+colnames(plants)[5:8] <- c("abeecs_plant","abeecs_rank_plant","abeecs_genus_plant","abeecs_GBIF")
+
+# assign
+globi_pol <- left_join(globi_pol, plants[, c(1:3, 5:8)])
+# check is.na
+check_na <- globi_pol[is.na(globi_pol$abeecs_plant),]
+globi_pol$abeecs_plant[is.na(globi_pol$abeecs_plant)] <- globi_pol$abeecs_GBIF[is.na(globi_pol$abeecs_plant)]
+globi_pol$abeecs_rank_plant[is.na(globi_pol$abeecs_rank_plant)] <- globi_pol$plant_level[is.na(globi_pol$abeecs_rank_plant)]
+write_csv(globi_pol, "../Extra/Intermediate/globi_pol.csv")
+```
+
+
+
+```{r}
+# link with our data
+abeecs <- data |> group_by(Plant_name, Plant_rank, Plant_genus, Plant_family) |> summarise(n= n())
+# add missing species 
+missing_species <- abeecs[!abeecs$Plant_name %in% plants$abeecs_plant,]
+length(missing_species$Plant_name)
+
+# now also add our species that are not in Lanuza
+plants[2339:(2339+ 21174), ] <- NA
+plants[2339:(2339+ 21174), c("abeecs_plant","abeecs_rank_plant","abeecs_genus_plant")] <- missing_species[, c("Plant_name","Plant_rank","Plant_genus")]
+plants$abeecs_rank_plant <- toupper(plants$abeecs_rank_plant)
+```
+
+
+
+### Interaction
+```{r}
+interact_globi <- globi_pol |> group_by(GBIF_name, abeecs_GBIF) |> summarise(n = n())
+interact_globi$int <- paste(interact_globi$GBIF_name, interact_globi$abeecs_GBIF, sep = " X ")
+```
+
+
+
+## 3.5 Overlap
+```{r}
+# Check correspondence
+globi_lan <- globi_pol[globi_pol$database %in% c("Lanuza et al. 2025"),]
+
+# Check correspondence
+check <- lanuza_pol |> distinct(abeecs_name, Pollinator_accepted_name, Pollinator_accepted_GBIF,  Pollinator_original_name)
+check <- globi_pol |> distinct(GBIF_name, bee_species)
+
+# Check whether a species is not in lanuza but is in globi
+check <- globi_lan[!globi_lan$abeesc_name %in% lanuza_pol$abeecs_name,]
+unique(check$abeesc_name)
+```
+
+
+
+# RED LIST
+## 4.1 Load
+```{r}
+# Load data
+red <- read.csv("C:/Users/u0166342/Documents/Doctoraat/Observation/Extra/Names/EU red list bees.csv")
+
+# Get first against our own database
+abeecs <- data |> group_by(Bee_accepted_name, Pol_original, Bee_rank, Bee_species, Bee_genus, Bee_family) |> summarise(n= n())
+# Link
+red$gbif <- abeecs$Bee_accepted_name[match(red$Species.name, abeecs$Bee_accepted_name)]
+red$gbif_rank <- abeecs$Bee_rank[match(red$Species.name, abeecs$Bee_accepted_name)]
+sum(is.na(red$gbif))
+# 1193 left
+
+# Also assign the non-accepted ones
+# But first check them
+check <- abeecs[abeecs$Pol_original %in% red$Species.name[is.na(red$gbif)],]
+# Link these non-accepted names
+red$gbif[is.na(red$gbif)] <- abeecs$Bee_accepted_name[match(red$Species.name[is.na(red$gbif)], abeecs$Pol_original)]
+red$gbif_rank[is.na(red$gbif_rank)] <- abeecs$Bee_rank[match(red$Species.name[is.na(red$gbif_rank)], abeecs$Pol_original)]
+sum(is.na(red$gbif))
+# 1155 left
+```
+
+## 4.2 GBIF
+```{r}
+# Remaining ones
+remaining <- red[is.na(red$gbif),]
+
+# create database
+gbif <- name_backbone_checklist(remaining$Species.name[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1 + floor(length(remaining$Species.name)/10*(i-1))
+  end <- floor(length(remaining$Species.name)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(remaining$Species.name[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+
+# remove the first one
+gbif <- gbif[-1, ]
+
+# get and assign all accepted
+gbif_acc <- gbif[gbif$status == "ACCEPTED" & !is.na(gbif$usageKey)&gbif$matchType == "EXACT",]
+remaining$gbif <- gbif_acc$species[match(remaining$Species.name, gbif_acc$verbatim_name)]
+remaining$gbif_rank <- tolower(gbif_acc$rank[match(remaining$Species.name, gbif_acc$verbatim_name)])
+
+# Get synonyms
+gbif_acc <- gbif[gbif$status == "SYNONYM" & !is.na(gbif$usageKey)&gbif$matchType == "EXACT",]
+remaining$gbif[is.na(remaining$gbif)] <- gbif_acc$subspecies[match(remaining$Species.name[is.na(remaining$gbif)], gbif_acc$verbatim_name)]
+remaining$gbif_rank[is.na(remaining$gbif_rank) & !is.na(remaining$gbif)] <- "subspecies"
+remaining$gbif[is.na(remaining$gbif)] <- gbif_acc$species[match(remaining$Species.name[is.na(remaining$gbif)], gbif_acc$verbatim_name)]
+remaining$gbif_rank[is.na(remaining$gbif_rank) & !is.na(remaining$gbif)] <- "species"
+
+# Get variants
+gbif_acc <- gbif[!is.na(gbif$usageKey)&gbif$matchType == "VARIANT",]
+remaining$gbif[is.na(remaining$gbif)] <- gbif_acc$species[match(remaining$Species.name[is.na(remaining$gbif)], gbif_acc$verbatim_name)]
+remaining$gbif_rank[is.na(remaining$gbif_rank) & !is.na(remaining$gbif)] <- "species"
+
+# Assign
+red[is.na(red$gbif),] <- remaining
+```
+
+
+```{r}
+# Remaining
+remaining <- red[is.na(red$gbif),]
+# check remaining
+gbif <- gbif[gbif$verbatim_name %in% remaining$Species.name,]
+
+
+# Some have to be changed
+change <- data.frame(old = c("Andrena acuta", "Andrena lecana","Andrena donata",
+                             "Andrena gomerensis","Andrena nigropilosa",
+                             "Andrena tenostra","Andrena walishanovi",
+                             "Coelioxys quadridentatus","Eoanthidium pasteelsi",
+                             "Halopanurgus baldocki","Halopanurgus fuzetus",
+                             "Hoplitis corcyraea","Icteranthidium floripetum",
+                             "Seladonia concinna","Seladonia cyprica",
+                             "Seladonia inpilosa","Seladonia mucorea",
+                             "Seladonia pseudomucorea","Seladonia semitica",
+                             "Sphecodes algeriensis","Seladonia cretella",
+                             "Seladonia orientana","Seladonia phryganica",
+                             "Seladonia submediterranea","Seladonia tecta",
+                             "Seladonia vestita", "Andrena heterodoxa",
+                             "Anthophora monacha","Nomiapis fugax","Nomiapis rufiventris",
+                             "Seladonia gemmella"),
+                     new = c("Andrena wollastoni","Andrena niveata",
+                             "Andrena medeninensis","Andrena wollastoni",
+                             "Andrena truncatilabris","Andrena mariana",
+                             "Andrena schwarzi","Coelioxys conicus",
+                             "Eoanthidium judaeense","Camptopoeum baldocki",
+                             "Flavipanurgus fuzetus","Hoplitis yermasoyiae corcyraea",
+                             "Icteranthidium grohmanni","Halictus concinnus",
+                             "Halictus cypricus","Halictus inpilosus","Halictus mucoreus",
+                             "Halictus pseudomucoreus","Halictus semiticus",
+                             "Sphecodes alternatus algeriensis","Halictus cretellus",
+                             "Halictus orientanus", "Halictus phryganicus",
+                             "Halictus submediterraneus","Halictus tectus",
+                             "Halictus vestitus", "Andrena bicolor",
+                             "Anthophora retusa","Pseudapis fugax","Nomiapis paulyi",
+                             "Halictus gemmellus"))
+
+# Assign
+remaining$gbif <- change$new[match(remaining$Species.name, change$old)]
+# All the rest will just be used
+remaining$gbif[is.na(remaining$gbif)] <- remaining$Species.name[is.na(remaining$gbif)] 
+
+# Get ranks
+remaining$gbif_rank[!is.na(word(remaining$gbif, 3))] <- "subspecies"
+remaining$gbif_rank[is.na(remaining$gbif_rank)] <- "species"
+
+# Assign
+red[is.na(red$gbif),] <- remaining 
+# Fix some remaining Seladonia to Halictus species
+red$gbif[red$gbif %in% change$old] <- change$new[match(red$gbif[red$gbif %in% change$old], change$old)]
+```
+
+
+```{r}
+# Get species again
+abeecs <- data |> group_by(Bee_accepted_name, Bee_rank, Pol_original, Platform, Country) |> summarise(n=n())
+
+# Not all are available in our dataset
+not <- abeecs[!abeecs$Bee_accepted_name %in% red$gbif,]
+# Not at species level
+not_species <- not[not$Bee_rank == "species",]
+unique(not_species$Bee_accepted_name)
+
+# Change some to gbif
+red$gbif[red$Species.name %in% "Cubiandrena cubiceps"] <- "Andrena cubiceps"
+red$gbif[red$Species.name %in% "Rhophitoides epiroticus"] <- "Rophites epiroticus"
+red$gbif[red$Species.name %in% "Rhophitoides canus"] <- "Rophites canus"
+red$gbif[red$Species.name %in% "Nomiapis"] <- "Pseudapis"
+red$gbif[red$Species.name %in% "Seladonia semitecta"] <- "Halictus semitectus"
+red$gbif[red$Species.name %in% "Seladonia pulverea"] <- "Halictus pulvereus"
+red$gbif[red$Species.name %in% "Seladonia microcardia"] <- "Halictus microcardia"
+
+```
+
+
+```{r}
+# Missing in the red list
+red_mis <- red[!red$gbif %in% c(data$Bee_accepted_name),]
+# 1115
+red_mis |> group_by(European.category) |> summarise(n=n()/nrow(red_mis))
+
+
+# Compare to overall list
+red |> group_by(European.category) |> summarise(n=n()/nrow(red))
+# Amount of endangered species is lower here
+
+
+# In our database are mostly species that are not threatened 
+red_yes <- red[red$gbif %in% c(data$Bee_accepted_name),]
+red_yes |> group_by(European.category) |> summarise(n=n()/nrow(red_yes))
+# 82% LC, 0.2% CR, 4% DD, 2% EN, 8% NT, 2% VU
+
+
+# Assign genera
+red$genus <- vegdata::parse.taxa(red$gbif)[,2]
+red_genus <- red |> group_by(genus) |> summarise(n=n())
+
+# Check whether all genera are in our database
+remaining <- unique(red$genus[!red$genus %in% unique(data$Bee_genus)])
+# 9 genera are not
+abeecs$gen_new <- (vegdata::parse.taxa(abeecs$Pol_original)[[2]])
+# save this version of names
+unique(remaining[!remaining %in% unique(abeecs$gen_new)])
+unique(remaining[remaining %in% unique(abeecs$gen_new)])
+# There are 76 genera
+length(unique(red$genus))
+# Get the dataset and number in genera
+red_genus[red_genus$genus %in% remaining,]
+
+
+# so in total 35 species remain
+write_csv(red, "../Extra/Intermediate/red.csv")
+```
+
+
+```{r}
+# Now look at the intermediately filtered dataset
+subset <- data[(!is.na(data$Plant_user) | (!is.na(data$Plant_plantnet) & data$Plantnet_score >= 0.619 )),]
+subset <- subset |> group_by(Bee_accepted_name, Plant_name) |> filter(n() >= 2) |> ungroup()
+# Get our names again
+abeecs <- subset |> group_by(Bee_accepted_name, Bee_rank, Pol_original,Bee_species, Bee_genus) |> summarise(n=n())
+
+# how does the red list data look
+dup <- red[duplicated(red$gbif) | duplicated(red$gbif, fromLast = T),]
+# Some are duplicated due to the merging
+check <- dup[dup$Species.name != dup$gbif,]
+# These are the ones that are the same
+dup <- dup <- dup[dup$Species.name == dup$gbif,]
+# Remove these ones for now
+red <- red[!((duplicated(red$gbif) | duplicated(red$gbif, fromLast = T)) & red$Species.name != red$gbif), ]
+# How many species are in the dataset
+red_yes <-  red[red$gbif %in% c(abeecs$Bee_species),]
+red_yes |> group_by(European.category) |> summarise(n=n()/(653), n_all =n())
+
+# look at which not
+not_red <- abeecs[!abeecs$Bee_species %in% red$gbif,]
+yes_red <- abeecs[abeecs$Bee_species %in% red$gbif,]
+
+# Against all data
+names_complete <-  data |> group_by(Bee_accepted_name, Bee_rank, Bee_genus, Bee_species, Bee_family) |> summarise(n=n())
+
+# Check the genera that are not anymore in ABeeCs
+names_complete <- names_complete[!names_complete$Bee_genus %in% abeecs$Bee_genus,]
+names_complete <- names_complete[!is.na(names_complete$Bee_species),]
+names_complete <- names_complete |> group_by(Bee_genus, Bee_family) |> summarise(n = length(unique(Bee_species)))
+# If you want to see the ones that are in Red List
+names_complete <- names_complete[names_complete$Bee_genus %in% red_genus$genus,]
+# If you want to see the ones that are not in the RED dataset 
+names_complete <- names_complete[!names_complete$Bee_genus %in% red_genus$genus,]
+# Eupavlovskia not in red
+
+# Look at number of species in red
+red_genus[red_genus$genus %in% names_complete$Bee_genus,]
+# Are all genera in red
+names_complete[!names_complete$Bee_genus %in% red_genus$genus,]
+# Are all genera in the filtered dataset
+red_genus[!red_genus$genus %in% abeecs$Bee_genus,]
+```
+
+
+# PLOT
+## 5.1 Prepare
+```{r}
+# Remove all wind-pollinated species from ABeeCs, GloBI and EuPPollNet
+data$Plant_rank <- toupper(data$Plant_rank)
+lanuza_pol$abeecs_rank <- toupper(lanuza_pol$abeecs_rank)
+
+# Remove pollinated species
+remove <- data[!data$Pollination_syndrome %in% c("insect"),]
+data <- data[data$Pollination_syndrome %in% c("insect"),]
+
+# Are these species also in the other datasets
+remove_species <- remove |> distinct(Plant_species, Plant_genus, Plant_family) 
+unique(remove_species$Plant_family)
+
+
+#### GLOBI
+# Check whether they occur in GloBI
+# Make sure they all have a genus
+globi_pol$abeecs_genus_plant[is.na(globi_pol$abeecs_genus_plant)] <- vegdata::parse.taxa(globi_pol$abeecs_plant[is.na(globi_pol$abeecs_genus_plant)])[[1]]
+globi_pol_removed <- globi_pol[globi_pol$abeecs_genus_plant %in% remove_species$Plant_genus,]
+globi_pol <-  globi_pol[!globi_pol$abeecs_genus_plant %in% remove_species$Plant_genus,]
+
+# Check whether other occur in lanuza
+lanuza_pol$abeecs_genus_plant[lanuza_pol$abeecs_plant %in% "Candollea mollis"] <- "Candollea"
+lanuza_pol$abeecs_genus_plant[is.na(lanuza_pol$abeecs_genus_plant)] <- vegdata::parse.taxa(lanuza_pol$abeecs_plant[is.na(lanuza_pol$abeecs_genus_plant)])[[1]]
+lanuza_pol_removed <- lanuza_pol[lanuza_pol$abeecs_genus_plant %in% remove_species$Plant_genus,]
+lanuza_pol <-  lanuza_pol[!lanuza_pol$abeecs_genus_plant %in% remove_species$Plant_genus,]
+
+
+
+# Only keep plant observations at species level
+lanuza_pol |> group_by(abeecs_rank) |> summarise( n = n())
+lanuza_pol <- lanuza_pol[!is.na(lanuza_pol$abeecs_species_plant),]
+# Also for globi
+globi_pol <- globi_pol[!globi_pol$abeecs_rank_plant %in% c("genus", "genus_level"),]
+colnames(globi_pol)
+```
+
+## 5.2 Merge
+```{r}
+# Get number in globi
+interact_globi <- globi_pol |> group_by(GBIF_name, abeecs_GBIF) |> summarise(n = n())
+interact_globi$int <- paste(interact_globi$GBIF_name, interact_globi$abeecs_GBIF, sep = " X ")
+colnames(interact_globi) <- c("Pol_GBIF","Plant_GBIF","n_globi","Interactions")
+
+
+# get number in EUPPollNet
+interact_lanuza <- lanuza_pol |> group_by(Pollinator_accepted_GBIF, abeecs_plant) |> summarise(n = n())
+interact_lanuza$int <- paste(interact_lanuza$Pollinator_accepted_GBIF, interact_lanuza$abeecs_plant, sep = " X ")
+colnames(interact_lanuza) <- c("Pol_GBIF","Plant_GBIF","n_lanuza","Interactions")
+
+# merge 
+overall <- full_join(interact_globi, interact_lanuza )
+overall$Dataset[!is.na(overall$n_globi) & !is.na(overall$n_lanuza)] <- "Both"
+nrow(overall[overall$Dataset=="Both",])
+overall$Dataset[is.na(overall$n_globi) & !is.na(overall$n_lanuza)] <- "EUPPollNet"
+nrow(overall[overall$Dataset=="EUPPollNet",])
+overall$Dataset[!is.na(overall$n_globi) & is.na(overall$n_lanuza)] <- "GloBI"
+nrow(overall[overall$Dataset=="GloBI",])
+```
+
+
+
+
+## 5.3 Relative
+```{r}
+# get numbers
+overview <- data.frame()
+for(i in c( 1,2,5)){
+  # also subdivide per confidence
+  for(j in c(0, 0.619, 0.887)){
+  # our data
+  data_subset <- data[(!is.na(data$User_species)|(!is.na(data$Plantnet_species) & data$Plantnet_score >=j )),]
+  data_subset <- data_subset[!is.na(data_subset$Bee_species),]
+  int_us <- data_subset |> group_by(Bee_species, Plant_species) |> summarise( n_abeecs = n())
+  int_us$Interactions <- paste(int_us$Bee_species, int_us$Plant_species, sep = " X ")
+  
+  
+  # merge
+  subset <- full_join(overall, int_us[,c(1:2,3,4)])
+  
+  # remove our values if not relevant
+  subset$Bee_species[subset$n_abeecs < i] <- NA
+  subset$Plant_species[subset$n_abeecs < i] <- NA
+  subset$Interactions[subset$n_abeecs < i & is.na(subset$Pol_GBIF)] <- NA
+  subset$n_abeecs[subset$n_abeecs < i] <- NA
+  subset <- subset[!is.na(subset$Interactions), ]
+  
+  subset$all_pol <- subset$Pol_GBIF
+  subset$all_pol[is.na(subset$all_pol)] <- subset$Bee_species[is.na(subset$all_pol)]
+  subset$all_plant <- subset$Plant_GBIF
+  subset$all_plant[is.na(subset$all_plant)] <- subset$Plant_species[is.na(subset$all_plant)]
+
+  G_pol <- unique(overall$Pol_GBIF[!is.na(overall$n_globi)])
+  L_pol <- unique(overall$Pol_GBIF[!is.na(overall$n_lanuza)])
+  A_pol <- unique(subset$Bee_species)
+  
+  G_plant <- unique(overall$Plant_GBIF[!is.na(overall$n_globi)])
+  L_plant <- unique(overall$Plant_GBIF[!is.na(overall$n_lanuza)])
+  A_plant <- unique(subset$Plant_species)
+    
+  # calculate the relative values
+  int <- data.frame(
+    typ  = "int",
+    threshold = i,
+    reliability =j,
+    n_total = nrow(subset),
+    
+    # interactions
+    all =sum(!is.na(subset$n_globi) & !is.na(subset$n_lanuza) & !is.na(subset$n_abeecs))/
+      nrow(subset),
+    lanuza_abeecs =sum(is.na(subset$n_globi) & !is.na(subset$n_lanuza) &
+                         !is.na(subset$n_abeecs)) /nrow(subset),
+    globi_abeecs =sum(!is.na(subset$n_globi) & is.na(subset$n_lanuza) &
+                        !is.na(subset$n_abeecs)) /  nrow(subset),
+    lanuza = sum(is.na(subset$n_globi) & !is.na(subset$n_lanuza) & is.na(subset$n_abeecs)) /
+      nrow(subset),
+    globi = sum(!is.na(subset$n_globi) & is.na(subset$n_lanuza) & is.na(subset$n_abeecs)) /
+      nrow(subset),
+    abeecs = sum(is.na(subset$n_globi) & is.na(subset$n_lanuza) & !is.na(subset$n_abeecs)) /
+      nrow(subset),
+    globi_lanuza = sum(!is.na(subset$n_globi) & !is.na(subset$n_lanuza) &
+                         is.na(subset$n_abeecs)) /nrow(subset) )
+  
+  # pollinator data
+  pol <- data.frame(
+    typ  = "pol",
+    threshold = i,
+    reliability =j,
+    n_total = length(unique(na.omit(subset$all_pol))),
+    
+    # unique pollinators
+    all = length(Reduce(intersect, list(G_pol,L_pol,A_pol))) /
+      length(unique(na.omit(subset$all_pol))),
+    lanuza_abeecs= length(setdiff(intersect(A_pol,L_pol), G_pol))/
+      length(unique(na.omit(subset$all_pol))),
+    globi_abeecs = length(setdiff(intersect(G_pol,A_pol), L_pol))/
+      length(unique(na.omit(subset$all_pol))) ,
+    lanuza = length(setdiff( L_pol, union( A_pol,G_pol)))/
+      length(unique(na.omit(subset$all_pol))),
+    globi =  length(setdiff( G_pol, union( A_pol,L_pol)))/
+      length(unique(na.omit(subset$all_pol))),
+    abeecs =  length(setdiff( A_pol, union( L_pol,G_pol)))/
+      length(unique(na.omit(subset$all_pol))),
+    globi_lanuza =  length(setdiff(intersect(G_pol,L_pol), A_pol))/
+      length(unique(na.omit(subset$all_pol))))
+    
+  
+  # Plant_name data
+  plant <- data.frame(
+    typ  = "plant",
+    threshold = i,
+    reliability =j,
+    n_total = length(unique(na.omit(subset$all_plant))),
+    
+    # unique pollinators
+    all = length(Reduce(intersect, list(G_plant,L_plant,A_plant))) /
+      length(unique(na.omit(subset$all_plant))),
+    lanuza_abeecs= length(setdiff(intersect(A_plant,L_plant), G_plant))/
+      length(unique(na.omit(subset$all_plant))),
+    globi_abeecs = length(setdiff(intersect(G_plant,A_plant), L_plant))/
+      length(unique(na.omit(subset$all_plant))) ,
+    lanuza = length(setdiff( L_plant, union( A_plant,G_plant)))/
+      length(unique(na.omit(subset$all_plant))),
+    globi =  length(setdiff( G_plant, union( A_plant,L_plant)))/
+      length(unique(na.omit(subset$all_plant))),
+    abeecs =  length(setdiff( A_plant, union( L_plant,G_plant)))/
+      length(unique(na.omit(subset$all_plant))),
+    globi_lanuza =  length(setdiff(intersect(G_plant,L_plant), A_plant))/
+      length(unique(na.omit(subset$all_plant))))
+  
+  overview <- bind_rows(overview, int, pol, plant)
+  }
+}
+```
+
+
+## 3.3 Plot
+### Data
+```{r}
+# Plot data figure
+plot_data <- overview |> pivot_longer(cols = c(5:11), names_to = "source",   values_to = "value")
+# Get data we are interested in
+plot_data <- plot_data[(plot_data$threshold == "1" & plot_data$reliability == unique(plot_data$reliability)[1]) |
+                       (plot_data$threshold=="2" & plot_data$reliability == "0.619") | 
+                       (plot_data$threshold=="5" & plot_data$reliability == "0.887"),]
+
+# make rings of certain classes
+plot_data$ring[plot_data$threshold == "1" & plot_data$reliability == unique(plot_data$reliability)[1]] <- "Low"
+plot_data$ring[plot_data$threshold == "2" & plot_data$reliability == unique(plot_data$reliability)[2]] <- "Middle"
+plot_data$ring[plot_data$threshold == "5" & plot_data$reliability == unique(plot_data$reliability)[3]] <- "High"
+plot_data$ring <- factor(plot_data$ring, levels = c("High","Middle", "Low"))
+
+# Assign source levels
+plot_data$source <- factor(plot_data$source, levels = c("lanuza","globi","abeecs","lanuza_abeecs","globi_abeecs","globi_lanuza","all"))
+src_levels <- levels(plot_data$source)
+
+
+# Get where the rings are located (this is the x axis)
+plot_data <- plot_data |>  mutate(xmin = c(2, 3, 4)[as.numeric(ring)], xmax = xmin + 0.8)
+
+# Subdivide the data here
+plot_data_int <- plot_data[plot_data$typ =="int",]
+plot_data_int <- plot_data_int |>  group_by(ring) |>  arrange(source) |>  mutate(ymax = cumsum(value), ymin = lag(ymax, default = 0), ymid = (ymin+ymax)/2)
+
+# Assign colours
+cols <- scico(7, palette = "berlin")
+cols <- cols[1:7]
+
+
+# plot
+plot_int <- ggplot(plot_data_int) +
+  geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = source), 
+            colour = "white", alpha = 0.65) + 
+  coord_polar(theta = "y") +
+  xlim(1, 5) +
+  theme_void()+
+  geom_text(aes(x = xmin + 0.4, y = ymid, label = round(value, 2)*100), size =4 )+
+  scale_fill_manual(name = "Dataset",values = cols, 
+                    labels = c("Only EuPPollNet","Only GloBI","Only ABeeCs",
+                               "Only ABeeCs and GloBI", "Only ABeeCs and EuPPollNet","Only EuPPollNet and GloBI" ,
+                               "All databases"))+
+  theme(legend.position = "null")+
+  ggtitle("Interactions") +
+  theme(plot.title = element_text(hjust = 0.5, vjust= -7, face="bold"))
+```
+
+
+```{r}
+# subdivide the data here
+plot_data_pol <- plot_data[plot_data$typ =="pol",]
+plot_data_pol <- plot_data_pol |>  group_by(ring) |>  arrange(source) |>  mutate(ymax = cumsum(value), ymin = lag(ymax, default = 0), ymid = (ymin+ymax)/2)
+
+# plot
+plot_pol <- ggplot(plot_data_pol) +
+  geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = source), 
+            colour = "white", alpha = 0.65) + 
+  coord_polar(theta = "y") +
+  xlim(1, 5) +
+  theme_void()+
+  geom_text(aes(x = xmin + 0.4, y = ymid, label = round(value, 2)*100), size =4 )+
+  scale_fill_manual(name = "Dataset",values = cols,
+                    labels = c("Only EuPPollNet","Only GloBI","Only ABeeCs",
+                               "Only ABeeCs and GloBI","Only ABeeCs and EuPPollNet", "Only EuPPollNet and GloBI",
+                               "All databases"))+
+  theme(legend.position = "null")+
+  ggtitle("Bees") +
+  theme(plot.title = element_text(hjust = 0.5, vjust= -7, face="bold"))
+
+                  
+# subdivide the data here
+plot_data_plant <- plot_data[plot_data$typ =="plant",]
+plot_data_plant <- plot_data_plant |>  group_by(ring) |>  arrange(source) |>  mutate(ymax = cumsum(value), ymin = lag(ymax, default = 0), ymid = (ymin+ymax)/2)
+
+# plot
+plot_plant <- ggplot(plot_data_plant) +
+  geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = source), colour = "white", alpha = 0.65) + 
+  coord_polar(theta = "y") +
+  xlim(1, 5) +
+  theme_void()+
+  geom_text(aes(x = xmin + 0.4, y = ymid, label = ifelse(round(value, 2)*100< 1, NA,
+                                                         round(value, 2)*100)), size =4 )+
+  scale_fill_manual(name = "Dataset",values = cols,
+                    labels = c("Only EuPPollNet","Only GloBI","Only ABeeCs",
+                               "Only ABeeCs and GloBI", "Only ABeeCs and EuPPollNet", "Only EuPPollNet and GloBI" ,
+                               "All databases"))+
+  theme(legend.title=element_blank())+
+  theme(legend.position = "bottom", legend.title.position = NULL)+
+  guides(fill = guide_legend(nrow = 3))+
+  ggtitle("Plants") +
+  theme(plot.title = element_text(hjust = 0.5, vjust= -7, face="bold"))
+
+legend <- get_legend(plot_plant)
+ggsave("../Images/plot_compare_legend.png", legend, width =6, height = 2)
+
+plot_plant <- plot_plant + theme(legend.position = "null")
+
+plot_int <- plot_int + theme(plot.margin = margin(10, 10, 10, 10))
+plot_pol <- plot_pol + theme(plot.margin = margin(10, 10, 10, 10))
+plot_plant <- plot_plant + theme(plot.margin = margin(10, 10, 10, 10))
+
+ggarrange(plot_int, plot_pol, plot_plant, common.legend =  T, labels = letters[1:3], ncol =3, nrow =1, align ="hv", legend= "bottom")
+
+#ggsave("../Images/plot_plant_compare.png", plot_plant , width = 4, height =4)
+#ggsave("../Images/plot_int_compare.png", plot_int , width = 4, height =4)
+#ggsave("../Images/plot_pol_compare.png", plot_pol , width = 4, height =4)
+
+```
+
+
+### Legend
+```{r}
+# Get values
+df <- data.frame(ring = as.factor(c("low", "medium","high")),
+                 value = c(100,100,100),
+                 ymin= c(0,0,0),
+                 ymax= c(100,100,100),
+                 xmin = c(4,3,2),
+                 xmax = c(4.8,3.8,2.8),
+                 ymid = c(50,50,50),
+                 label = c("Unfiltered","Moderate filtering","Strict filtering"))
+
+
+arc_df <- do.call(rbind, lapply(seq_len(nrow(df)), function(i) {
+  data.frame( ring  = df$ring[i],  label = df$label[i], x = df$xmin[i] + 0.4, 
+              y = seq(5, 95, length.out = 200))}))
+
+# plot
+plot <- ggplot(df) +
+  geom_rect(aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = ring),
+            colour = "white") +
+  geom_textpath(data = arc_df,aes(x = x, y = y, label = label, group = ring),
+    size      = 6,  fontface  = "bold",  color     = "black",  upright   = TRUE) +
+  coord_polar(theta = "y") +
+  xlim(1, 5) +
+  theme_void()+
+  theme(legend.title=element_blank())+
+  theme(legend.position = "none")+
+  scale_fill_manual(values = c( "low"= "#E8E8E8", "medium" = "#A8A8A8", "high"   = "#5A5A5A"))
+plot
+#ggsave("../Images/plot_pol_filtering.png", plot , width = 4, height =4)
+```

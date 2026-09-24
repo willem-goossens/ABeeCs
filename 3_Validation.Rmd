@@ -1,0 +1,225 @@
+---
+title: "Validation"
+author: "Willem Goossens"
+output: html_document
+---
+
+
+# 1 INTRO
+Empty environment
+```{r}
+rm(list=ls())
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(ggpubr)
+library(scico)
+```
+
+Load data
+```{r}
+# Overall dataset
+data <- read_csv("../Data/Observation/plantnet_dataset_newest_newest.csv", show_col_types = FALSE)
+```
+
+
+# 2 Validation
+```{r}
+# get all data with plant data
+validation <- data[!is.na(data$Plant_user) & !is.na(data$Plant_plantnet),]
+
+
+# Get data at species level
+# Do not use the rank (eg subspecies are also at species level)
+validation_species <- validation[!is.na(validation$User_species) & !is.na(validation$Plantnet_species),]
+validation_species <- validation_species[ validation_species$User_rank != "aggregate",]
+
+# Genus level
+validation_genus <- validation[!is.na(validation$User_genus) & !is.na(validation$Plantnet_genus),]
+
+# Family level
+validation_family <- validation[!is.na(validation$User_family) & !is.na(validation$Plantnet_family),]
+```
+
+
+### Thresholds
+```{r}
+# Get value at certain threshold 80%
+# Check between two thresholds
+thresholds <- seq(0.85, 0.9, by=0.01)
+agreement_df <- data.frame(threshold = thresholds)
+
+# check values for the range
+agreement_df$agreement <- sapply(thresholds, function(th){
+  data <- validation_species[validation_species$Plantnet_score >= th, ]
+  mean(data$User_species == data$Plantnet_species, na.rm=T)})
+
+# which one is the closest
+approx_result <- approx( x = agreement_df$agreement, y = agreement_df$threshold, xout = 0.9)
+approx_result$y
+```
+
+
+### Agreement
+```{r}
+# Get multiple score levels
+score_levels <- data.frame(score_levels = c(0, 0.067, 0.342, 0.619, 0.887))
+score_levels_species <- data.frame(score_levels = c(0, 0.067, 0.342, 0.619, 0.887))
+score_levels_species$type <- "Species"
+score_levels_genus <- data.frame(score_levels = c(0, 0.067, 0.342, 0.619, 0.887))
+score_levels_genus$type <- "Genus"
+score_levels_family <- data.frame(score_levels = c(0, 0.067, 0.342, 0.619, 0.887))
+score_levels_family$type <- "Family"
+
+
+# Agreement at species level
+for(i in 1: nrow(score_levels)){
+  subset <- validation_species[validation_species$Plantnet_score >= score_levels$score_levels[i],]
+  score_levels_species$score[i] <- nrow(subset[subset$User_species==subset$Plantnet_species, ])/nrow(subset)
+  score_levels_species$n[i] <- nrow(subset)
+  score_levels_species$rel[i] <- nrow(subset)/nrow(validation_species)
+}
+
+
+# Agreement at genus level
+validation_genus <- validation[!is.na(validation$User_genus) & !is.na(validation$Plantnet_genus),]
+for(i in 1: nrow(score_levels)){
+  subset <- validation_genus[validation_genus$Plantnet_score >= score_levels$score_levels[i],]
+  score_levels_genus$score[i] <- nrow(subset[subset$User_genus==subset$Plantnet_genus, ])/nrow(subset)
+  score_levels_genus$n[i] <- nrow(subset)
+  score_levels_genus$rel[i] <- nrow(subset)/nrow(validation_genus)
+}
+
+
+# Agreement at family level
+validation_family <- validation[!is.na(validation$User_family) & !is.na(validation$Plantnet_family),]
+for(i in 1: nrow(score_levels)){
+  subset <- validation_family[validation_family$Plantnet_score >= score_levels$score_levels[i],]
+  score_levels_family$score[i] <- nrow(subset[subset$User_family==subset$Plantnet_family, ])/nrow(subset)
+  score_levels_family$n[i] <- nrow(subset)
+  score_levels_family$rel[i] <- nrow(subset)/nrow(validation_family)
+}
+
+
+# Bind the scores
+score_levels <- rbind(score_levels_species, score_levels_genus, score_levels_family)
+score_levels$type <- factor( score_levels$type, levels = c("Species", "Genus", "Family") )
+```
+
+
+### Plot
+```{r}
+# Assign colors
+col_here <- scico(5+2, palette = "berlin")
+col_here <- col_here[2:6]
+
+# Plot this
+plot_validation <- ggplot(data = score_levels, aes(x= type, y= score, group= score_levels, fill= factor(score_levels))) +
+  geom_col(position="dodge", alpha = 0.5)+
+  ggpubr::theme_pubr()+
+  theme(legend.position="none", legend.box = "vertical", legend.title.position = "top",axis.text.y = element_text(size = 12))+
+  theme(legend.title = element_text(hjust = 0.5))+
+  xlab(NULL)+
+  ylab("Percentage\nof aggreement")+ 
+  guides(fill = guide_legend(ncol = 1))+
+  scale_fill_manual(values = col_here,   name = "Reliability score") +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1),   labels = \(x) ifelse(round(x,1) %in% c(0.2, 0.4,0.6, 0.8, 1), round(x,1), ""))
+
+# Show
+plot_validation
+```
+
+
+# 3 Numbers
+### Calculate
+```{r}
+# Get all relevant data
+overview_data <- data.frame()
+
+# Run for different numbers of thresholds
+for(i in c( 1,2,5,10)){
+  
+  # Also subdivide per confidence
+  for(j in c(0, 0.067, 0.342, 0.619, 0.887)){
+  
+  # Subdivide our data for the score
+  data_subset <- data[(!is.na(data$Plant_user) | (!is.na(data$Plant_plantnet) & data$Plantnet_score >=j )),]
+  # Get the number of interactions between a bee and plant
+  subset <- data_subset |> group_by(Bee_accepted_name, Plant_name) |> summarise( n = n())
+  # Join as one entry
+  subset$int <- paste(subset$Bee_accepted_name, subset$Plant_name, sep = " X ")
+
+  # Assign NA values
+  subset$Bee_accepted_name[subset$n < i] <- NA
+  subset$Plant_name[subset$n < i] <- NA
+  subset$int[subset$n < i] <- NA
+  subset$n[subset$n < i] <- NA
+  # Subset data
+  subset <- subset[!is.na(subset$n),]
+  
+  # Get number of interactions, observations, bees and plants
+  mis <- data.frame(threshold = i, reliability =j,
+    n_interactions = length(unique(subset$int)),
+    n_observations = nrow(data_subset |> group_by(Bee_accepted_name, Plant_name) |> summarise(n =n()) |> filter(n > i-1) |> ungroup()),
+    n_bees = length(unique(subset$Bee_accepted_name)),
+    n_plants = length(unique(subset$Plant_name)))
+  
+  # Join data
+  overview_data <- bind_rows(overview_data, mis)
+  }
+}
+```
+
+
+### Numbers
+```{r}
+# Get data to plot
+threshold_pivot <- overview_data |>  pivot_longer(cols = c("n_interactions", "n_bees", "n_plants"),names_to = "data",values_to = "rel")
+threshold_pivot$data <- factor(threshold_pivot$data,levels = c("n_interactions", "n_bees", "n_plants"), labels = c("Unique\ninteractions", "Unique\nBees", "Unique\nPlants"))
+
+# Calculate relative values within each data category
+threshold_pivot <- threshold_pivot |> group_by(data) |> mutate( rel_scaled = rel / max(rel), label = scales::comma(rel)) |>  ungroup()
+threshold_pivot <- threshold_pivot |>  mutate(label_x = ifelse(rel_scaled < 0.25, rel_scaled, 0.03), hjust_lab = ifelse(rel_scaled < 0.12, -0.1, 0))
+
+# Get scores
+threshold_pivot <- threshold_pivot |> mutate(reliability = formatC(as.numeric(as.character(reliability)), format = "f", digits = 3),
+                                             reliability = ifelse(as.numeric(reliability) < 0.05, "0", reliability),
+                                             reliability = factor(reliability))
+```
+
+
+### Plot
+```{r}
+# Get label names
+agreement_labels <- c("0" = "0\n(53.2%)","0.067" = "0.067\n(60%)","0.343" = "0.342\n(70%)","0.619" = "0.619\n(80%)","0.887" = "0.887\n(90%)")
+
+# Assign these names
+threshold_pivot$reliability <- factor(threshold_pivot$reliability,levels = names(agreement_labels))
+ 
+# Plot
+plot_rel <- ggplot( threshold_pivot,aes(x = rel_scaled, y = factor(threshold), fill = factor(reliability))) +
+  geom_col( position= position_dodge(width = 0.9) , alpha=0.5) +
+  geom_text(aes( x = label_x, label = label, hjust = hjust_lab), position= position_dodge(width = 0.9), vjust = 0.5, size = 3, color = "black") +
+  facet_grid( ~ data,scales = "free_x",switch = "x"  ) + 
+  scale_fill_manual(values = col_here,     labels = agreement_labels, name = "Confidence score threshold\n(level of agreement)") +
+  scale_x_continuous(  labels = scales::percent_format(accuracy = 1),expand = expansion(mult = c(0, 0.15))) +
+  ggpubr::theme_pubr() +
+  theme( legend.position = "bottom",  strip.text = element_text(size = 12), axis.text.y = element_text(size = 12), axis.title.y = element_text(size = 12),
+    panel.spacing = unit(0.5, "lines"),  strip.background = element_blank(),strip.placement = "outside", legend.text = element_text(size = 10), legend.title = element_text(size = 12)) +
+  labs( x = NULL,y = "Minimum\nnumber of interactions")
+
+plot_rel
+#ggsave("../Images/Threshold_reliability.png", plot_rel, width = 8, height = 4)
+```
+
+### Merge
+```{r}
+# Merge plots
+merged_plot <- ggarrange(plot_validation, plot_rel, nrow = 2, labels = LETTERS[1:2],  align= "hv", common.legend = F , heights = c(1,2.5))
+
+# Save plot
+ggsave("../Images/Threshold_reliability_validation_new.svg", merged_plot, width = 8, height =6)
+ggsave("../Images/Threshold_reliability_validation_new.png", merged_plot, width = 8, height =6)
+```

@@ -1,0 +1,606 @@
+---
+title: "Final dataset merging"
+author: "Willem Goossens"
+output: html_document
+---
+
+# START
+Empty environment
+```{r}
+rm(list=ls())
+```
+
+Load packages
+```{r}
+library(tidyverse)
+library(xml2)
+library(plantnet)
+library(rgbif)
+library(taxize)
+library(giscoR)
+library(sf)
+```
+
+Load data
+```{r}
+# Original dataset
+pol <- read.csv("../Results/Bees_all_observations.csv")
+```
+
+
+# ERRORS
+## 2.1 License
+```{r}
+# Some licenses were remaining that could not be used in the final database
+# Clean these out
+
+# First get the inaturalist data and the licenses that are save
+inat <- pol[pol$Platform %in% "iNaturalist.org",]
+save_licenses <- read_csv("../Data/Observation/iNaturalist_photos_licenses.csv", show_col_types = F)
+
+# Remove some that are not having the valid license
+inat_not <- inat[!inat$Obs_ID %in% unique(save_licenses$observation_uuid),]
+# 20620
+
+# Remove these from the dataset
+pol <- pol[!pol$Obs_ID %in% inat_not$Obs_ID,]
+
+# check whether we mis unique species
+mis_bee <- inat_not$Bee_accepted_name[!inat_not$Bee_accepted_name %in% pol$Bee_accepted_name]
+mis_plant <- inat_not$Plantnet_GBIF_accepted_name[!inat_not$Plantnet_GBIF_accepted_name %in% pol$Plantnet_GBIF_accepted_name]
+# We remove 6 unique bees (5 species) and 87 plants
+```
+
+
+## 2.2 Lacking
+```{r}
+# Remove data without plants
+nrow(pol[is.na(pol$Plant_user) & is.na(pol$Plant_plantnet),])
+# These are 654191 observations
+pol <- pol[!is.na(pol$Plant_name),]
+
+# Check validation data again
+validation <- pol[!is.na(pol$Plant_user) & !is.na(pol$Plant_plantnet),]
+# We remain having 157353 observations of both plant and pollinator species
+```
+
+
+
+# POLLINATION
+## 2.1 Classes
+```{r}
+# Get list of all plant families
+fam <- pol |> group_by(Plant_family) |> summarise(n = n())
+fam <- fam[!duplicated(fam$Plant_family),]
+
+# Add families that are only in plantnet
+# We also add the coordinate uncertainty to ensure that we can match with "n"
+check <- pol[!((pol$Plantnet_family) %in% fam$Plant_family) & !is.na(pol$Plantnet_family), c("Plantnet_family","Coordinate_uncertainty")]
+colnames(check) <- colnames(fam)
+fam <- bind_rows(fam, check)
+
+# There are in total 409 families, we will check them to remove the ferns and mosses based on their class
+gbif <- name_backbone_checklist(fam$Plant_family[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(fam$Plant_family)/10*(i-1))
+  end <- floor(length(fam$Plant_family)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(fam$Plant_family[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+
+
+# Assign class and order
+fam$class <- gbif$class[match(fam$Plant_family, gbif$family)]
+fam$order <- gbif$order[match(fam$Plant_family, gbif$family)]
+
+# Check the unique classes
+unique(fam$class)
+# Remove the mosses and ferns
+remove <- fam[fam$class %in% c("Bryopsida", "Polypodiopsida","Charophyceae","Lycopodiopsida", "Zygnematophyceae", "Cyanobacteriia","Sphagnopsida"),]
+
+# These correspond to 4238 observation and 390 unique species
+length(unique(pol$Plant_name[pol$Plant_family %in% remove$Plant_family]))
+length((pol$Plant_name[pol$Plant_family %in% remove$Plant_family]))
+# Check where this data comes from
+source <- pol |> filter(Plant_family %in% remove$Plant_family) |> group_by(Plant_name_source) |> summarise(n = n())
+
+# Remove this data altogether
+pol <- pol[!pol$Plant_family %in% remove$Plant_family,]
+# Also check whether it remains somewhere
+nrow(pol[(pol$User_family %in% remove$Plant_family) & (pol$Plantnet_family %in% remove$Plant_family),])
+```
+
+
+## 2.2 Orders and families
+```{r}
+# Reduce the dataset
+fam <- fam[!fam$class %in% remove$class,]
+
+#######
+# Check orders
+sort(unique(fam$order))
+
+# These can be removed
+wind_order <- c("Gunnerales", "Ceratophyllales", "Pinales", "Ginkgoales")
+fam$pol[fam$order %in% wind_order]  <- "wind"
+
+# Check Poales, Ephedrales, Gnetales, Fagales, Garryales, Trochodendrales, Buxales individually
+# These are some families where we have to be careful: families Amaranthaceae, Chenopodiaceae, Zosteraceae, Dioscoreaceae,Cannabaceae, Urticaceae
+
+
+#######
+# Check families
+# Create the smaller data frame
+check <- fam[(fam$order %in% c( "Poales", "Ephedrales", "Gnetales", "Fagales", "Garryales", "Trochodendrales", "Buxales",
+                               "Caryophyllales", "Alismatales", "Dioscoreales", "Rosales", "Pandanales")) & is.na(fam$pol),]
+
+# Look at the families
+# These are some wind pollinated families
+wind_families <- c( "Cannabaceae", "Casuarinaceae", "Eucommiaceae", "Gunneraceae", "Juglandaceae", "Juncaceae", "Juncaginaceae",
+                    "Myricaceae", "Nothofagaceae", "Restionaceae", "Thurniaceae", "Ulmaceae", "Urticaceae")
+# These are water pollinated
+water_families <- c("Cymodoceaceae", "Posidoniaceae", "Ruppiaceae", "Zosteraceae", "Potamogetonaceae")
+
+# Assign
+fam$pol[fam$Plant_family %in% wind_families]  <- "wind"
+fam$pol[fam$Plant_family %in% water_families]  <- "water"
+
+# These families were manually checked and a quick look in google could not easily distinguish the pollination syndrome
+# Amaranthacea, Betulaceae, Buxaceae, Cyperaceae, Ephedraceae, Fagaceae, Flagellariaceae, Garryaceae, Poaceae, Typhaceae
+# Hydrocharitaceae, Mayacaceae, Gisekiaceae, Limeaceae, Microteaceae
+# Moraceae, Polygonaceae,Trochodendraceae, Pandanaceae, Tofieldiaceae
+
+#######
+# Check genera
+# Here is data frame
+check <- pol |> distinct(Plant_genus, Plant_family)
+check <- check[check$Plant_family %in% c( "Amaranthaceae", "Betulaceae", "Buxaceae", "Cyperaceae", "Ephedraceae", "Fagaceae", "Flagellariaceae", "Garryaceae", "Poaceae",
+                                          "Typhaceae", "Hydrocharitaceae", "Mayacaceae", "Gisekiaceae", "Limeaceae", "Microteaceae", "Moraceae", "Polygonaceae",
+                                          "Trochodendraceae", "Pandanaceae", "Tofieldiaceae"), ]
+# We cannot do that that easy for 394 genera, check using the try database
+```
+
+
+## 2.3 TRY
+### Load
+```{r}
+# Get plant names
+plants <- pol |> group_by(Plant_name, Plant_genus, Plant_family, Plant_rank) |> summarise(n =n())
+
+# Load try data
+pol_syn <- read.delim("../Extra/Extra/Pollination/50193.txt",  fileEncoding = "latin1", stringsAsFactors = FALSE,  quote = "")
+
+# Get data
+pol_syn <- pol_syn[!is.na(pol_syn$TraitID),]
+pol_syn <- pol_syn[, c(3,5,7,10,11,13,14,15)]
+```
+
+### Method
+```{r}
+# Subdivide based on method
+pol_syn_method <- pol_syn[pol_syn$TraitID == "205", ]
+# Look at the options
+pol_options <- pol_syn_method |> group_by(OrigValueStr) |> summarise(n = n())
+# Get wind or water
+pol_syn_wind <- pol_syn_method[pol_syn_method$OrigValueStr %in% c("not applicable" , "water flowers: pollination on or under water" , "wind flowers"  ),]
+# Note that we are rather "relaxed", if it is "occasionally visited" we keep it here
+```
+
+
+### Syndrome
+```{r}
+# Get data on syndrome
+pol_syn <- pol_syn[pol_syn$TraitID == "29", ]
+# Check unique values
+polmode <- pol_syn |> group_by(OrigValueStr) |> summarise(n =n())
+
+# Get those that are "suspicious"
+wind_vector <- c("Anemofila","Anemophily", "Wind", "anemogamous","anemophil", "pollination wind",
+                  "wind", "wind always","wind often","wind pollinated","wind the rule", "wind flowers")
+
+water_vector <-  c( "hydrogamous", "water","water always","water the rule", "water flowers: pollination on or under water")
+
+other_vector <- c("cleistogamy the rule","cleistogamy often","geitonogamy the rule", "geitonogamy often","pseudocleistogamy often","pseudocleistogamy the rule",
+                  "self", "selfed", "selfing always", "selfing the rule","selfing often", "no", "pollination no", "not applicable", "abio")
+
+mixed_vector <- c( "wind flowers occassionally visited by insect","transition type pollen flowers - wind blossoms occassionally visited by insect",
+                   "mixed wind/insect pollinated","anemogamous/entomogamous","autogamous/entomogamous","Animals Wind")
+
+different_vector <- c("Homoptera", "Thysanoptera", "bugs", "bird")
+
+# Questionable types kept here
+# autogamous (can self-fertilize, but not always necessary)
+# cleistogamy (stay closed and fertilize self)
+# pseudocleistogamy (flowers not open and self fertilizing)
+
+# Get subset
+pol_syn_wind <- pol_syn |> group_by(AccSpeciesName, OrigValueStr) |> summarise(n = n())
+# Assign a general definition
+pol_syn_wind$try <- NA
+pol_syn_wind$try[pol_syn_wind$OrigValueStr %in% wind_vector] <- "wind"
+pol_syn_wind$try[pol_syn_wind$OrigValueStr %in% water_vector] <- "water"
+pol_syn_wind$try[pol_syn_wind$OrigValueStr %in% other_vector] <- "other"
+pol_syn_wind$try[pol_syn_wind$OrigValueStr %in% mixed_vector] <- "other"
+pol_syn_wind$try[pol_syn_wind$OrigValueStr %in% different_vector] <- "other"
+pol_syn_wind$try[is.na(pol_syn_wind$try)] <- "insect"
+
+# Group the data by name and pollination syndrome
+pol_syn_wind <- pol_syn_wind |> group_by(AccSpeciesName, try) |> summarise(n = n())
+
+# Which are duplicated (and hence were assigned both insect and another method)
+dup <- pol_syn_wind[duplicated(pol_syn_wind$AccSpeciesName) | duplicated(pol_syn_wind$AccSpeciesName, fromLast=T),]
+```
+
+### Genus
+```{r}
+# Get genus 
+pol_syn_wind$genus <- word(pol_syn_wind$AccSpeciesName, 1)
+# Assign family
+pol_syn_wind$family <- plants$Plant_family[match(pol_syn_wind$genus, plants$Plant_genus)]
+
+# Not all genera were present in our database, better to improve the naming also using GBIF
+gbif <- name_backbone_checklist(pol_syn_wind$AccSpeciesName[1])
+# subdivide to avoid R crashing
+for(i in 1: 10){
+  # boundaries
+  begin <- 1+ floor(length(pol_syn_wind$AccSpeciesName)/10*(i-1))
+  end <- floor(length(pol_syn_wind$AccSpeciesName)/10 * i)
+  # run 
+  data_gbif <- name_backbone_checklist(pol_syn_wind$AccSpeciesName[begin: end])
+  gbif <- bind_rows(gbif, data_gbif)
+}
+gbif <- gbif[-1,]
+gbif_try <- gbif
+gbif <- gbif_try
+
+# Remove fungi
+gbif <- gbif[!gbif$kingdom %in% "Fungi",]
+
+# Assign final
+gbif$final <- gbif$subspecies
+gbif$final[is.na(gbif$final)] <- gbif$species[is.na(gbif$final)] 
+gbif$final[is.na(gbif$final)] <- gbif$genus[is.na(gbif$final)] 
+gbif$final[is.na(gbif$final)] <- gbif$family[is.na(gbif$final)] 
+
+# Get accepted
+gbif_acc <- gbif[gbif$status == "ACCEPTED" & gbif$matchType =="EXACT",]
+pol_syn_wind$GBIF <- gbif_acc$final[match(pol_syn_wind$AccSpeciesName, gbif_acc$verbatim_name)]
+# Get synonym
+gbif_acc <- gbif[gbif$status == "SYNONYM" & gbif$matchType =="EXACT",]
+pol_syn_wind$GBIF[is.na(pol_syn_wind$GBIF)] <- gbif_acc$final[match(pol_syn_wind$AccSpeciesName[is.na(pol_syn_wind$GBIF)] , gbif_acc$verbatim_name)]
+# Get genera
+pol_syn_wind$GBIF_genus <- word(pol_syn_wind$GBIF, 1)
+# If still not found we assign the genera that we already had
+pol_syn_wind$GBIF_genus[is.na(pol_syn_wind$GBIF_genus)] <- pol_syn_wind$genus[is.na(pol_syn_wind$GBIF_genus)]
+
+# Remaining gbif
+gbif <- gbif[gbif$verbatim_name %in% pol_syn_wind$AccSpeciesName[is.na(pol_syn_wind$GBIF)],]
+```
+
+
+```{r}
+# We continue with all genera that we have
+pol_syn_gen <- pol_syn_wind[pol_syn_wind$GBIF_genus %in% pol$Plant_genus,]
+
+######
+# Duplicates
+# Look at the genera
+pol_genus <- pol_syn_gen |> group_by(GBIF_genus, family, try) |> summarise(n = n())
+# Check duplicated
+dup <- pol_genus[duplicated(pol_genus$GBIF_genus) | duplicated(pol_genus$GBIF_genus, fromLast=T),]
+
+# We will not be too strict, so we remove the 'other' reference
+dup <- dup[!dup$try %in% "other",]
+# Now get duplicates that are both insect and wind 
+dup_two <- dup[duplicated(dup$GBIF_genus) | duplicated(dup$GBIF_genus, fromLast=T),]
+
+######
+# Number
+# Get the one with the most references
+# If the number is equal, assign nothing yet
+resolved_dup_two <- dup_two |> group_by(GBIF_genus) |> mutate(max_n = max(n), n_at_max = sum(n == max_n)) |>
+  summarise(try_final = if (n_at_max[1] == 1) try[which.max(n)] else NA_character_, .groups = "drop")
+
+# Which are now resolved (not duplicated anymore)
+resolved_dup_single <- dup |>  filter(!GBIF_genus %in% dup_two$GBIF_genus) |>  distinct(GBIF_genus, try) |>  rename(try_final = try)
+
+
+#####
+# Check the ones that were equal in number
+resolved_NA <- dup[dup$GBIF_genus %in%  resolved_dup_two$GBIF_genus[is.na(resolved_dup_two$try_final)],]
+
+# Assign uncertain so that we can check if they are in the database
+resolved_dup_two$try_final[is.na(resolved_dup_two$try_final)] <- "uncertain"
+
+#####
+# Combine both resolution sets
+resolved_all <- bind_rows(resolved_dup_two, resolved_dup_single)
+
+
+#####
+# Back to genus
+pol_genus$try[pol_genus$GBIF_genus %in% resolved_all$GBIF_genus] <- 
+  resolved_all$try_final[match(pol_genus$GBIF_genus[pol_genus$GBIF_genus %in% resolved_all$GBIF_genus], resolved_all$GBIF_genus)]
+
+# Check against our genera
+check$try <- pol_genus$try[match(check$Plant_genus, pol_genus$GBIF_genus)]
+# We have data for 202 genera
+sum(!is.na(check$try))
+
+#####
+# Some have to be checked
+check$try[check$Plant_genus %in% "Castanea"] <- "insect"
+
+# Check the families
+wind_genera <- check$Plant_genus[check$try %in% "wind"]
+
+# How many per family are in the database
+check <- check |>  distinct(Plant_family, Plant_genus, try) |>  group_by(Plant_family) |> 
+  mutate( n = n_distinct(Plant_genus),n_try = sum(!is.na(try), na.rm = TRUE)) |> ungroup()
+
+# We will check the families
+fam_test <- check |> group_by(Plant_family) |> summarise(wind = sum(try == "wind", na.rm = TRUE)/n(), insect = sum(try == "insect", na.rm = TRUE)/n(),
+                                                         uncertain = sum(try == "uncertain", na.rm = TRUE)/n(), other = sum(try == "other", na.rm = TRUE)/n())
+```
+
+
+### Manual
+```{r}
+# Some changes
+check$try[check$Plant_genus %in% "Sparganium"] <- "insect" # Partly insects
+check$try[check$Plant_family %in% "Poaceae"] <- "wind" # All not wind were incorrect
+check$try[check$Plant_family %in% "Fagaceae" & is.na(check$try)] <- "insect" # The four remaining genera Lithocarpus, Chrysolepis, Notholithocarpus and Castanopsis have insects
+check$try[check$Plant_family %in% "Cyperaceae"] <- "wind" # Although some have occasional flower visits from bees, they are primarily wind pollinated
+check$try[check$Plant_family %in% "Betulaceae"] <- "wind" # Although some have occasional flower visits from bees, they are primarily wind pollinated
+# Amaranthaceae
+check$try[check$Plant_family %in% "Amaranthaceae" & check$try %in% "uncertain"] <- "wind" # Although some have occasional flower visits from bees, they are primarily wind
+check$try[check$Plant_genus %in% "Corispermum"] <- "wind" # Incorrect in database
+check$try[check$Plant_genus %in% "Caroxylon"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Achyranthes"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Haloxylon"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Deeringia"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Aerva"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Calicorema"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Hermbstaedtia"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Bosea"] <- "insect" # Checked
+check$try[check$Plant_family %in% "Amaranthaceae" & is.na(check$try)] <- "wind" # The remaining genera are wind pollinated
+# Moraceae
+check$try[check$Plant_genus %in% "Maclura"] <- "wind" # Checked
+check$try[check$Plant_genus %in% "Bagassa"] <- "wind" # Checked
+check$try[check$Plant_genus %in% "Brosimum"] <- "wind" # Checked
+check$try[check$Plant_genus %in% "Castilla"] <- "wind" # Checked
+check$try[check$Plant_genus %in% "Treculia"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Naucleopsis"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Taxotrophis"] <- "insect" # Checked
+check$try[check$Plant_family %in% "Moraceae" & is.na(check$try)] <- "wind" # The remaining genera are wind pollinated
+# Polygonaceae
+check$try[check$Plant_genus %in% "Oxyria"] <- "wind" # Checked
+check$try[check$Plant_genus %in% "Koenigia"] <- "wind" # Checked
+check$try[check$Plant_family %in% "Polygonaceae" & is.na(check$try)] <- "insect" # The remaining genera are wind pollinated
+# Buxaceae
+check$try[check$Plant_family %in% "Buxaceae"] <- "insect" # Checked
+# Flagellariaceae 
+check$try[check$Plant_family %in% "Flagellariaceae"] <- "wind" # Checked
+# Garryaceae
+check$try[check$Plant_family %in% "Garryaceae"] <- "wind" # Checked
+# Gisekia
+check$try[check$Plant_genus %in% "Gisekia"] <- "insect" # Checked
+# Hydrocharitaceae
+check$try[check$Plant_genus %in% "Hydrilla"] <- "water" # Checked
+check$try[check$Plant_genus %in% "Vallisneria"] <- "water" # Checked
+check$try[check$Plant_genus %in% "Hydrocharis "] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Ottelia"] <- "insect" # Checked
+check$try[check$Plant_family %in% "Hydrocharitaceae" & is.na(check$try)] <- "water" # The remaining genera are wind pollinated
+# Limeaceae 
+check$try[check$Plant_family %in% "Limeaceae"] <- "insect" # Checked
+# Mayacaceae
+check$try[check$Plant_family %in% "Mayacaceae"] <- "insect" # Checked
+# Pandanaceae
+check$try[check$Plant_genus %in% "Freycinetia"] <- "other" # Checked
+# Tofieldiaceae
+check$try[check$Plant_family %in% "Tofieldiaceae"] <- "insect" # Checked
+# Trochodendraceae
+check$try[check$Plant_family %in% "Trochodendraceae"] <- "insect" # Checked
+check <- check[!is.na(check$Plant_genus),]
+# All are checked
+```
+
+### Assign
+```{r}
+# Check which species in our dataset are now not insect pollinated
+
+plants$pol <- NA
+plants$pol[plants$Plant_family %in% fam$Plant_family] <- fam$pol[match(plants$Plant_family[plants$Plant_family %in% fam$Plant_family], fam$Plant_family)]
+plants$pol[plants$Plant_genus %in% check$Plant_genus]  <- check$try[match(plants$Plant_genus[plants$Plant_genus %in% check$Plant_genus], check$Plant_genus)]
+```
+
+## 2.4 Check
+```{r}
+# Some extra have to be added
+wind_extra <- c("Phillyrea","Populus","Olea","Littorella","Callitriche", "Fraxinus","Hippophae", "Exbucklandia","Distylium","Parrotia","Rhodoleia","Sinowilsonia",
+                "Liquidambar", "Hippuris")
+wind_extra_fam <- c("Cercidiphyllaceae", "Coriariaceae", "Haloragaceae", "Platanaceae", "Poaceae")
+
+# Plants 
+plants$pol[plants$Plant_genus %in% wind_extra] <- "wind"
+plants$pol[plants$Plant_family %in% wind_extra_fam] <- "wind"
+```
+
+
+```{r}
+# Assign the rest to plant
+plants$pol[is.na(plants$pol)] <- "insect"
+#write_csv(plants, "../Extra/Intermediate/pollination_syndrom.csv")
+plants <- read_csv("../Extra/Intermediate/pollination_syndrom.csv")
+# Assign to the dataset
+pol$Pollination_syndrome <- plants$pol[match(pol$Plant_name, plants$Plant_name)]
+```
+
+
+# REGION
+## 3.1 Countries
+```{r}
+# Get data
+obs <- pol
+
+# Get coordinates
+coord <- obs[, c("Obs_ID", "Latitude", "Longitude")] |>  st_as_sf(coords = c("Longitude", "Latitude"), crs = 4326)
+
+sf_use_s2(FALSE) 
+
+# Get country boundaries
+countries <- gisco_get_countries(resolution = "03") |> st_make_valid()
+
+# Islands to keep separate from their mainland country
+nuts2 <- gisco_get_nuts(nuts_level = 2, resolution = "03")
+
+# Sicily, Sardinia, Balearic Islands, Corsica, Crete
+islands_to_split <- c("Sicilia", "Sardegna", "Illes Balears", "Corse", "Κρήτη")
+islands_lookup <- nuts2 |> st_drop_geometry() |> filter(NUTS_NAME %in% islands_to_split) |> select(NUTS_ID, NUTS_NAME)
+   
+
+islands <- nuts2 |> filter(NUTS_ID %in% islands_lookup$NUTS_ID) |> st_make_valid()
+
+# Now that countries and islands exist, look up their code
+country_lookup <- countries |> st_drop_geometry() |> distinct(CNTR_ID, NAME_ENGL)
+island_lookup  <- islands   |> st_drop_geometry() |> distinct(NUTS_ID, NUTS_NAME)
+
+# Join data 
+region_lookup <- bind_rows(country_lookup |> rename(code = CNTR_ID, name = NAME_ENGL),island_lookup  |> rename(code = NUTS_ID,  name = NUTS_NAME))
+
+# Spatial join islands and countries
+country_join <- st_join(coord, countries[, "CNTR_ID"], join = st_within) |>  st_drop_geometry() |> distinct(Obs_ID, .keep_all = TRUE)
+island_join <- st_join(coord, islands[, "NUTS_ID"], join = st_within) |>  st_drop_geometry() |> distinct(Obs_ID, .keep_all = TRUE)
+
+# Get the island or country 
+result <- country_join |> left_join(island_join, by = "Obs_ID") |>  mutate(final_code = coalesce(NUTS_ID, CNTR_ID))
+
+# Coastal points that missed every polygon
+missing_ids <- result$Obs_ID[is.na(result$final_code)]
+missing <- coord[coord$Obs_ID %in% missing_ids, ]
+
+if (nrow(missing) > 0) {
+  nearest <- st_join(missing, countries[, "CNTR_ID"], join = st_nearest_feature)
+  nearest$distance <- as.numeric(st_distance(missing, countries[match(nearest$CNTR_ID, countries$CNTR_ID), ], by_element = TRUE))
+
+  idx <- match(nearest$Obs_ID, result$Obs_ID)
+  result$final_code[idx] <- ifelse(is.na(result$final_code[idx]), nearest$CNTR_ID, result$final_code[idx])
+}
+
+sf_use_s2(TRUE)
+
+# Assign the code, then look up the name from it
+obs$Country_code <- result$final_code[match(obs$Obs_ID, result$Obs_ID)]
+obs$Country      <- region_lookup$name[match(obs$Country_code, region_lookup$code)]
+
+# Check out the countries
+#sort(table(obs$Country))
+#sort(unique(obs$Country))
+```
+
+
+## 3.2 Compare
+```{r}
+# Get the ones that are different
+check <- obs[obs$Euro.Med_region != obs$Country,]
+# Look at the different options
+dup <- check |> group_by(Euro.Med_region, Country, Country_code) |> summarise(n = n())
+# The majority are real differences (eg islands instead of countries)
+
+# We will merge some small islands to their corresponding country
+merge_country <- c( "Isle of Man" = "United Kingdom", "Guernsey" = "United Kingdom",  "Jersey" = "United Kingdom")
+
+# Assign
+obs$Country_code <- ifelse(obs$Country %in% names(merge_country), "UK", obs$Country_code)
+obs$Country <- ifelse(obs$Country %in% names(merge_country), merge_country[obs$Country], obs$Country)
+```
+
+## 3.3 Assign
+```{r}
+pol <- obs
+```
+
+
+
+# SAVE
+### Structure
+```{r}
+# Save the data
+save_data <- pol
+
+
+# Arrange the colnames
+data <- pol[, c( "Platform", "Obs_ID", "Date", "Time", "Latitude", "Longitude","Coordinate_uncertainty", "Country", "Country_code", "Observation_quality", "Anomaly_score", "Link",
+                  "Bee_accepted_scientific_name", "Bee_GBIF_key", "Bee_accepted_name", "Bee_rank", "Bee_subspecies", "Bee_species", "Bee_genus", "Bee_family", 
+                  "Pol_original", "Pol_family_original", "Pol_rank_original",
+                  "Number", "Sex", "Life_stage", "Activity",
+                  "Plant_GBIF_accepted_name", "Plant_GBIF_ID",
+                  "Plant_name", "Plant_rank", "Plant_subspecies", "Plant_species", "Plant_genus", "Plant_family","Plant_name_source", "Pollination_syndrome",
+                  "Plantnet_GBIF_accepted_name", "Plantnet_GBIF_ID",
+                  "Plant_plantnet", "Plantnet_rank", "Plantnet_subspecies", "Plantnet_species", "Plantnet_genus", "Plantnet_family",  "Plantnet_score", "Plantnet_organ",
+                  "User_GBIF_accepted_name", "User_GBIF_ID",
+                  "Plant_user", "User_rank", "User_subspecies", "User_species", "User_genus", "User_family",  "User_original", "User_original_rank")]
+```
+
+
+
+```{r}
+# read again for some changes
+#data <- read_csv("../Results/ABeeCs.csv", show_col_types = FALSE)
+
+# Add colnames consistent with DarwinCore (or GBIF for some, i.e. canonicalName and infraspecies/ species)
+colnames(data) <- c(
+  # Metadata
+  "datasetName", "occurrenceID", "eventDate", "eventTime",
+  "decimalLatitude", "decimalLongitude", "coordinateUncertaintyInMeters",  "country", "countryCode",
+  "identificationVerificationStatus",  "anomalyScore", 
+  "references",
+  
+  # Bee data
+  "scientificName", "scientificNameID", "canonicalName", "taxonRank", 
+  "infraspecies", "species", "genus", "family", 
+  "verbatimIdentification",  "verbatimFamily", "verbatimRank", 
+  "individualCount", "sex", "lifeStage", "behavior",
+  
+  # Plant data consensus
+  "associatedTaxonScientificName", "associatedTaxonID",
+  "associatedTaxonCanonicalName", "associatedTaxonRank",
+  "associatedTaxonInfraspecies", "associatedTaxonSpecies",
+  "associatedTaxonGenus", "associatedTaxonFamily",
+  "associatedTaxonMatchSource", "associatedTaxonPollinationSyndrome",          
+
+  # Plant data plantnet
+  "associatedTaxonScientificName_plantnet", "associatedTaxonID_plantnet",
+  "associatedTaxonCanonicalName_plantnet", "associatedTaxonRank_plantnet",
+  "associatedTaxonInfraspecies_plantnet", "associatedTaxonSpecies_plantnet",
+  "associatedTaxonGenus_plantnet", "associatedTaxonFamily_plantnet",
+  "identificationConfidence_plantnet",  "identificationOrgan_plantnet", 
+
+  # Plant data user
+  "associatedTaxonScientificName_user", "associatedTaxonID_user",
+  "associatedTaxonCanonicalName_user", "associatedTaxonRank_user",
+  "associatedTaxonInfraspecies_user", "associatedTaxonSpecies_user",
+  "associatedTaxonGenus_user", "associatedTaxonFamily_user",
+  "associatedTaxonVerbatimIdentification_user", "associatedTaxonVerbatimRank_user")
+```
+
+
+```{r}
+# File for sharing data
+write_csv(data, "../Results/ABeeCs.csv")
+# Own working file
+write_csv(save_data, "../Data/Observation/plantnet_dataset_newest_newest.csv")
+```
+
+
+```{r}
+
+```
+
+
+
+
