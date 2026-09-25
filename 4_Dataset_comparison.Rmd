@@ -901,7 +901,8 @@ unique(remaining[remaining %in% unique(abeecs$gen_new)])
 # There are 76 genera
 length(unique(red$genus))
 # Get the dataset and number in genera
-red_genus[red_genus$genus %in% remaining,]
+remaining <- red_genus[red_genus$genus %in% remaining,]
+# write to excel (special function) write.excel(remaining)
 
 
 # so in total 35 species remain
@@ -913,6 +914,7 @@ write_csv(red, "../Extra/Intermediate/red.csv")
 # Now look at the intermediately filtered dataset
 subset <- data[(!is.na(data$Plant_user) | (!is.na(data$Plant_plantnet) & data$Plantnet_score >= 0.619 )),]
 subset <- subset |> group_by(Bee_accepted_name, Plant_name) |> filter(n() >= 2) |> ungroup()
+subset <- subset[!is.na(subset$Bee_species) & !is.na(subset$Plant_species),]
 # Get our names again
 abeecs <- subset |> group_by(Bee_accepted_name, Bee_rank, Pol_original,Bee_species, Bee_genus) |> summarise(n=n())
 
@@ -926,7 +928,7 @@ dup <- dup <- dup[dup$Species.name == dup$gbif,]
 red <- red[!((duplicated(red$gbif) | duplicated(red$gbif, fromLast = T)) & red$Species.name != red$gbif), ]
 # How many species are in the dataset
 red_yes <-  red[red$gbif %in% c(abeecs$Bee_species),]
-red_yes |> group_by(European.category) |> summarise(n=n()/(653), n_all =n())
+red_yes |> group_by(European.category) |> summarise(n=n()/(633), n_all =n())
 
 # look at which not
 not_red <- abeecs[!abeecs$Bee_species %in% red$gbif,]
@@ -944,6 +946,7 @@ names_complete <- names_complete[names_complete$Bee_genus %in% red_genus$genus,]
 # If you want to see the ones that are not in the RED dataset 
 names_complete <- names_complete[!names_complete$Bee_genus %in% red_genus$genus,]
 # Eupavlovskia not in red
+# Write to excel: write.excel(names_complete)
 
 # Look at number of species in red
 red_genus[red_genus$genus %in% names_complete$Bee_genus,]

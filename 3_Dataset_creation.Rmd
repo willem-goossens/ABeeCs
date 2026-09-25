@@ -367,6 +367,7 @@ check$try[check$Plant_genus %in% "Aerva"] <- "insect" # Checked
 check$try[check$Plant_genus %in% "Calicorema"] <- "insect" # Checked
 check$try[check$Plant_genus %in% "Hermbstaedtia"] <- "insect" # Checked
 check$try[check$Plant_genus %in% "Bosea"] <- "insect" # Checked
+check$try[check$Plant_genus %in% "Amaranthus"] <- "wind"
 check$try[check$Plant_family %in% "Amaranthaceae" & is.na(check$try)] <- "wind" # The remaining genera are wind pollinated
 # Moraceae
 check$try[check$Plant_genus %in% "Maclura"] <- "wind" # Checked
@@ -428,6 +429,9 @@ wind_extra_fam <- c("Cercidiphyllaceae", "Coriariaceae", "Haloragaceae", "Platan
 # Plants 
 plants$pol[plants$Plant_genus %in% wind_extra] <- "wind"
 plants$pol[plants$Plant_family %in% wind_extra_fam] <- "wind"
+
+# Insect
+plants$pol[plants$Plant_genus %in% "Cleretum"] <- "wind"
 ```
 
 
@@ -438,6 +442,7 @@ plants$pol[is.na(plants$pol)] <- "insect"
 plants <- read_csv("../Extra/Intermediate/pollination_syndrom.csv")
 # Assign to the dataset
 pol$Pollination_syndrome <- plants$pol[match(pol$Plant_name, plants$Plant_name)]
+pol$Pollination_syndrome[is.na(pol$Pollination_syndrome)] <- "insect"
 ```
 
 
@@ -532,7 +537,7 @@ pol <- obs
 # Save the data
 save_data <- pol
 
-
+colnames(pol)
 # Arrange the colnames
 data <- pol[, c( "Platform", "Obs_ID", "Date", "Time", "Latitude", "Longitude","Coordinate_uncertainty", "Country", "Country_code", "Observation_quality", "Anomaly_score", "Link",
                   "Bee_accepted_scientific_name", "Bee_GBIF_key", "Bee_accepted_name", "Bee_rank", "Bee_subspecies", "Bee_species", "Bee_genus", "Bee_family", 
@@ -544,6 +549,8 @@ data <- pol[, c( "Platform", "Obs_ID", "Date", "Time", "Latitude", "Longitude","
                   "Plant_plantnet", "Plantnet_rank", "Plantnet_subspecies", "Plantnet_species", "Plantnet_genus", "Plantnet_family",  "Plantnet_score", "Plantnet_organ",
                   "User_GBIF_accepted_name", "User_GBIF_ID",
                   "Plant_user", "User_rank", "User_subspecies", "User_species", "User_genus", "User_family",  "User_original", "User_original_rank")]
+
+check <- data[is.na(data$Pollination_syndrome),]
 ```
 
 
