@@ -1,6 +1,5 @@
 ---
 title: "Taxonomy plot"
-author: "Willem Goossens"
 output: html_document
 ---
 

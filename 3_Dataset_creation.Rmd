@@ -1,6 +1,5 @@
 ---
 title: "Final dataset merging"
-author: "Willem Goossens"
 output: html_document
 ---
 
@@ -537,6 +536,7 @@ pol <- obs
 # Save the data
 save_data <- pol
 
+
 colnames(pol)
 # Arrange the colnames
 data <- pol[, c( "Platform", "Obs_ID", "Date", "Time", "Latitude", "Longitude","Coordinate_uncertainty", "Country", "Country_code", "Observation_quality", "Anomaly_score", "Link",
@@ -549,8 +549,6 @@ data <- pol[, c( "Platform", "Obs_ID", "Date", "Time", "Latitude", "Longitude","
                   "Plant_plantnet", "Plantnet_rank", "Plantnet_subspecies", "Plantnet_species", "Plantnet_genus", "Plantnet_family",  "Plantnet_score", "Plantnet_organ",
                   "User_GBIF_accepted_name", "User_GBIF_ID",
                   "Plant_user", "User_rank", "User_subspecies", "User_species", "User_genus", "User_family",  "User_original", "User_original_rank")]
-
-check <- data[is.na(data$Pollination_syndrome),]
 ```
 
 

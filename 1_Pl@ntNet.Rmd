@@ -1,6 +1,5 @@
 ---
 title: "Pl@ntNet"
-author: "Willem Goossens"
 output: html_document
 ---
 

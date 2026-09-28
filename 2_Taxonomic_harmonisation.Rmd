@@ -1,7 +1,5 @@
 ---
 title: "Name harmonization"
-author: "Willem Goossens"
-date: "2026-09-10"
 output: html_document
 ---
 

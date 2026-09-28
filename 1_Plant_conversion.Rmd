@@ -1,6 +1,5 @@
 ---
 title: "Identified plant conversion"
-author: "Willem Goossens"
 output: html_document
 ---
 

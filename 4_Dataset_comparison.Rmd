@@ -1,7 +1,5 @@
 ---
 title: "Dataset comparsion"
-author: "Willem Goossens"
-date: "2026-09-18"
 output: html_document
 ---
 
